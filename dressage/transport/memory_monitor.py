@@ -53,6 +53,32 @@ def _read_proxy_memory(pid_file: Path) -> dict[str, Any] | None:
     return _read_process_memory(pid)
 
 
+def _read_node_memory(
+    meminfo_path: Path = Path("/proc/meminfo"),
+) -> dict[str, Any] | None:
+    values = _read_kb_fields(
+        meminfo_path,
+        {"MemTotal", "MemAvailable", "SwapTotal", "SwapFree"},
+    )
+    total_bytes = values.get("MemTotal", 0) * 1024
+    if total_bytes == 0:
+        return None
+    available_bytes = values.get("MemAvailable", 0) * 1024
+    used_bytes = max(0, total_bytes - available_bytes)
+    swap_total_bytes = values.get("SwapTotal", 0) * 1024
+    swap_free_bytes = values.get("SwapFree", 0) * 1024
+    return {
+        "hostname": socket.gethostname(),
+        "total_bytes": total_bytes,
+        "available_bytes": available_bytes,
+        "used_bytes": used_bytes,
+        "usage_percent": round(used_bytes * 100 / total_bytes, 3),
+        "swap_total_bytes": swap_total_bytes,
+        "swap_free_bytes": swap_free_bytes,
+        "swap_used_bytes": max(0, swap_total_bytes - swap_free_bytes),
+    }
+
+
 def _actor_category(actor: Any) -> str | None:
     name = actor.name or ""
     if actor.class_name == "RolloutManager":
@@ -169,6 +195,7 @@ def main() -> None:
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "elapsed_seconds": round(time.monotonic() - started_at, 3),
                     "monitor_pid": os.getpid(),
+                    "master_node": _read_node_memory(),
                     "proxy": _read_proxy_memory(proxy_pid_file),
                     "rollout_manager": _memory_group(grouped["rollout_manager"]),
                     "transfer_queue": {
