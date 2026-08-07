@@ -43,6 +43,8 @@ from dressage.rollout.multi_segment import (
     compute_multi_segment_metrics,
     compute_prewarm_metrics,
 )
+from dressage.transport.client import release_lazy_samples
+from dressage.transport.payload import bind_training_batch
 
 
 def _max_retries() -> int:
@@ -75,7 +77,6 @@ async def _run_sync_rollout(
     rollout_id: int,
     data_buffer: Any,
 ) -> list[list[Any]]:
-    del rollout_id
     if GenerateState is None or generate_and_rm_group is None:
         raise RuntimeError(
             "Dressage sync rollout requires slime.rollout.sglang_rollout to be importable"
@@ -116,6 +117,7 @@ async def _run_sync_rollout(
                 data.append(result_group)
                 continue
 
+            await release_lazy_samples(result_group or group_for_task)
             summary = _group_failure_summary(
                 result_group if result_group is not None else group_for_task, error
             )
@@ -141,6 +143,7 @@ async def _run_sync_rollout(
     if not _allow_empty_train_batch() and not any(
         _group_has_trainable_tokens(group) for group in data
     ):
+        await release_lazy_samples(sample for group in data for sample in group)
         summaries = [_group_failure_summary(group) for group in data[: min(3, len(data))]]
         raise RuntimeError(
             "Dressage sync rollout produced no trainable samples; "
@@ -149,6 +152,8 @@ async def _run_sync_rollout(
             "Set DRESSAGE_ALLOW_EMPTY_TRAIN_BATCH=1 to keep the previous behavior."
         )
 
+    for group in data:
+        bind_training_batch(group, rollout_id)
     return data
 
 

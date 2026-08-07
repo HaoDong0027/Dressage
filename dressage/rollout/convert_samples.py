@@ -20,6 +20,11 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from dressage.transport.payload import (
+    TRAINING_PAYLOAD_METADATA_KEY,
+    TrainingPayloadRef,
+)
+
 _PROMPT_EQUAL_ESTIMATORS = ("grpo", "reinforce_plus_plus_baseline")
 
 
@@ -197,7 +202,64 @@ def convert_samples_to_train_data(args: Any, samples: list) -> dict:
     config_path = getattr(args, "mopd_teacher_config", None) or os.environ.get(
         "DRESSAGE_MOPD_TEACHER_CONFIG"
     )
-    if config_path:
+    training_payload_refs = [
+        (
+            None
+            if (getattr(sample, "metadata", None) or {}).get(
+                TRAINING_PAYLOAD_METADATA_KEY
+            )
+            is None
+            else TrainingPayloadRef.from_dict(
+                sample.metadata[TRAINING_PAYLOAD_METADATA_KEY]
+            )
+        )
+        for sample in samples
+    ]
+    lazy_payloads = any(ref is not None for ref in training_payload_refs)
+    if lazy_payloads:
+        train_data.pop("rollout_log_probs", None)
+        train_data.pop("rollout_routed_experts", None)
+        if config_path:
+            raise ValueError("MOPD does not support lazy TransferQueue payloads")
+        for sample, payload_ref in zip(
+            samples,
+            training_payload_refs,
+            strict=True,
+        ):
+            if payload_ref is None and not getattr(sample, "remove_sample", False):
+                raise ValueError(
+                    "trainable sample is missing its TransferQueue training payload"
+                )
+        batch_ids = {
+            ref.batch_id for ref in training_payload_refs if ref is not None
+        }
+        if len(batch_ids) != 1 or None in batch_ids:
+            raise ValueError(
+                "lazy TransferQueue samples must share one training batch ID"
+            )
+        batch_id = int(batch_ids.pop())
+        trajectory_ids = sorted(
+            {
+                ref.trajectory_id
+                for ref in training_payload_refs
+                if ref is not None
+            }
+        )
+        payload_keys = sorted(
+            {
+                ref.payload_key
+                for ref in training_payload_refs
+                if ref is not None
+            }
+        )
+        from dressage.transport.client import register_training_batch
+
+        register_training_batch(batch_id, trajectory_ids, payload_keys)
+        train_data["prompt"] = [
+            None if ref is None else ref.to_dict()
+            for ref in training_payload_refs
+        ]
+    elif config_path:
         if (
             not bool(getattr(args, "use_opd", False))
             or getattr(args, "opd_type", None) != "megatron"

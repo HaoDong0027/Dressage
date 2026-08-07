@@ -38,6 +38,17 @@ dressage_apply_common_defaults() {
   TOKEN_BUILD_MODE="${TOKEN_BUILD_MODE:-tito}"
   TOKEN_BUILD_MODEL="${TOKEN_BUILD_MODEL:-qwen3_5}"
 
+  DRESSAGE_ENABLE_TRANSFER_QUEUE="${DRESSAGE_ENABLE_TRANSFER_QUEUE:-0}"
+  DRESSAGE_TRANSFER_QUEUE_CONFIG="${DRESSAGE_TRANSFER_QUEUE_CONFIG:-${REPO_ROOT}/examples/scripts/default/dressage_transfer_queue.yaml}"
+  DRESSAGE_TRANSFER_QUEUE_RETENTION_SECONDS="${DRESSAGE_TRANSFER_QUEUE_RETENTION_SECONDS:-86400}"
+  DRESSAGE_MEMORY_MONITOR_ENABLED="${DRESSAGE_MEMORY_MONITOR_ENABLED:-0}"
+  DRESSAGE_MEMORY_MONITOR_INTERVAL_SECONDS="${DRESSAGE_MEMORY_MONITOR_INTERVAL_SECONDS:-5}"
+  DRESSAGE_MEMORY_MONITOR_LOG_FILE="${DRESSAGE_MEMORY_MONITOR_LOG_FILE:-${LOG_DIR}/transport/${RUN_NAME}.memory.jsonl}"
+  if [[ "${DRESSAGE_ENABLE_TRANSFER_QUEUE}" == "1" && ! -f "${DRESSAGE_TRANSFER_QUEUE_CONFIG}" ]]; then
+    echo "TransferQueue config does not exist: ${DRESSAGE_TRANSFER_QUEUE_CONFIG}" >&2
+    exit 1
+  fi
+
   DRESSAGE_TRAJECTORY_PAYLOAD_LOG_DIR="${DRESSAGE_TRAJECTORY_PAYLOAD_LOG_DIR:-${LOG_DIR}/traj_payload/${RUN_NAME}}"
   DRESSAGE_TRAJECTORY_ERROR_LOG_DIR="${DRESSAGE_TRAJECTORY_ERROR_LOG_DIR:-${LOG_DIR}/traj_err/${RUN_NAME}}"
   PROXY_LOG_FILE="${PROXY_LOG_FILE:-${LOG_DIR}/proxy/${RUN_NAME}.log}"
@@ -126,7 +137,42 @@ dressage_export_common_env() {
   export DRESSAGE_SANDBOX_PREWARM DRESSAGE_SANDBOX_PREWARM_AHEAD
   export DRESSAGE_BLACKBOX_MAX_STEPS DRESSAGE_BLACKBOX_COMPACT_THRESHOLD
   export DRESSAGE_TRAJECTORY_PAYLOAD_LOG_DIR DRESSAGE_TRAJECTORY_ERROR_LOG_DIR
+  export DRESSAGE_ENABLE_TRANSFER_QUEUE
+  export DRESSAGE_TRANSFER_QUEUE_CONFIG DRESSAGE_TRANSFER_QUEUE_RETENTION_SECONDS
   export DRESSAGE_RUN_NAME="${RUN_NAME}"
+}
+
+dressage_append_transfer_queue_proxy_args() {
+  if [[ "${DRESSAGE_ENABLE_TRANSFER_QUEUE}" == "1" ]]; then
+    PROXY_ARGS+=(
+      --enable-transfer-queue
+      --transfer-queue-config "${DRESSAGE_TRANSFER_QUEUE_CONFIG}"
+      --transfer-queue-retention-seconds "${DRESSAGE_TRANSFER_QUEUE_RETENTION_SECONDS}"
+    )
+  fi
+}
+
+dressage_start_memory_monitor() {
+  DRESSAGE_MEMORY_MONITOR_PID=""
+  if [[ "${DRESSAGE_MEMORY_MONITOR_ENABLED}" != "1" ]]; then
+    return
+  fi
+  mkdir -p "$(dirname "${DRESSAGE_MEMORY_MONITOR_LOG_FILE}")"
+  python3 "${REPO_ROOT}/dressage/transport/memory_monitor.py" \
+    --proxy-pid-file "${PROXY_PID_FILE}" \
+    --output-file "${DRESSAGE_MEMORY_MONITOR_LOG_FILE}" \
+    --interval-seconds "${DRESSAGE_MEMORY_MONITOR_INTERVAL_SECONDS}" \
+    >"${DRESSAGE_MEMORY_MONITOR_LOG_FILE}.runner.log" 2>&1 &
+  DRESSAGE_MEMORY_MONITOR_PID=$!
+  echo "Started Dressage memory monitor: pid=${DRESSAGE_MEMORY_MONITOR_PID} log=${DRESSAGE_MEMORY_MONITOR_LOG_FILE}"
+}
+
+dressage_stop_memory_monitor() {
+  if [[ -n "${DRESSAGE_MEMORY_MONITOR_PID:-}" ]]; then
+    kill "${DRESSAGE_MEMORY_MONITOR_PID}" 2>/dev/null || true
+    wait "${DRESSAGE_MEMORY_MONITOR_PID}" 2>/dev/null || true
+    DRESSAGE_MEMORY_MONITOR_PID=""
+  fi
 }
 
 dressage_export_local_bwrap_env() {

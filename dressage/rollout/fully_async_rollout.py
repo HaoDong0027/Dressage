@@ -49,6 +49,12 @@ from dressage.rollout.staleness import (
     config_from_args,
 )
 from dressage.rollout.prewarm.scheduler import PrewarmScheduler
+from dressage.transport.client import release_lazy_samples
+from dressage.transport.payload import (
+    LAZY_TRAJECTORY_METADATA_KEY,
+    TRAINING_PAYLOAD_METADATA_KEY,
+    bind_training_batch,
+)
 
 
 @dataclass
@@ -351,7 +357,9 @@ class AsyncRolloutWorker:
                 done_tasks = [task for task in active if task.done()]
                 for task in done_tasks:
                     group_id, group = active.pop(task)
-                    self._put_completed(_completed_from_task(group_id, group, task))
+                    completed = _completed_from_task(group_id, group, task)
+                    if not self._put_completed(completed):
+                        await release_lazy_samples(completed.for_training)
                     # Release this group's unconsumed pre-warm entries (if any)
                     # immediately after completion, without waiting for shutdown.
                     await self._scheduler.cleanup_group(group_id)
@@ -382,15 +390,22 @@ class AsyncRolloutWorker:
             # block in blackbox_dispatch calls schedule_terminate_paddock to
             # release claimed sandboxes; drain_lifecycle_tasks below waits
             # for all background lifecycle cleanup to finish.
+            discarded = self.get_completed_groups()
             if active:
                 for task in active:
                     task.cancel()
                 await asyncio.gather(*active.keys(), return_exceptions=True)
                 for task, (group_id, group) in active.items():
+                    discarded.append(_completed_from_task(group_id, group, task))
                     await self._scheduler.cleanup_group(group_id)
 
             await self._scheduler.cleanup()
             await drain_lifecycle_tasks()
+            await release_lazy_samples(
+                sample
+                for completed in discarded
+                for sample in completed.for_training
+            )
             logger.info("Dressage fully async rollout worker stopped")
 
     async def _run_group(self, group: list[Any], sampling_params: dict[str, Any]) -> list[Any]:
@@ -404,11 +419,11 @@ class AsyncRolloutWorker:
         )
         return _flatten_multi_segment_result(result)
 
-    def _put_completed(self, item: CompletedGroup) -> None:
+    def _put_completed(self, item: CompletedGroup) -> bool:
         while True:
             try:
                 self.output_queue.put(item, timeout=0.1)
-                return
+                return True
             except queue.Full:
                 if not self.running:
                     logger.error(
@@ -417,7 +432,7 @@ class AsyncRolloutWorker:
                         item.group_id,
                         self.output_queue.qsize(),
                     )
-                    return
+                    return False
 
     def get_completed_groups(self) -> list[CompletedGroup]:
         completed: list[CompletedGroup] = []
@@ -468,6 +483,8 @@ def _increment_retry(group: list[Any]) -> None:
         metadata.pop("session_id", None)
         metadata.pop("parent_traj_id", None)
         metadata.pop("segment_index", None)
+        metadata.pop(TRAINING_PAYLOAD_METADATA_KEY, None)
+        metadata.pop(LAZY_TRAJECTORY_METADATA_KEY, None)
         if hasattr(sample, "session_id"):
             sample.session_id = None
         metadata["dressage_retry_count"] = int(metadata.get("dressage_retry_count", 0)) + 1
@@ -479,7 +496,6 @@ async def generate_rollout_async(
     rollout_id: int,
     data_buffer: Any,
 ) -> tuple[list[list[Any]], dict[str, float]]:
-    del rollout_id
     worker = get_global_worker(args, data_buffer)
     target_data_size = int(getattr(args, "rollout_batch_size", 1))
     max_retries = int(os.environ.get("DRESSAGE_ROLLOUT_MAX_RETRIES", "2"))
@@ -504,9 +520,16 @@ async def generate_rollout_async(
         completed_groups = worker.get_completed_groups()
         advanced_version = staleness_filter.observe_completed(completed_groups)
         if advanced_version and data:
-            previous_count = len(data)
+            previous_data = data
             data = staleness_filter.filter_pending(data, logger)
-            if len(data) != previous_count:
+            if len(data) != len(previous_data):
+                kept_ids = {group.group_id for group in data}
+                await release_lazy_samples(
+                    sample
+                    for group in previous_data
+                    if group.group_id not in kept_ids
+                    for sample in group.samples
+                )
                 last_progress_time = time.time()
 
         for completed in completed_groups:
@@ -520,6 +543,7 @@ async def generate_rollout_async(
                 break
             completed = completed_by_id.pop(group_id)
             if completed.is_failed:
+                await release_lazy_samples(completed.for_training)
                 summary = _group_failure_summary(
                     completed.result or completed.original_group, completed.error
                 )
@@ -541,6 +565,14 @@ async def generate_rollout_async(
                     summary,
                 )
                 if dropped_failed_groups >= max_dropped_failed_groups:
+                    await release_lazy_samples(
+                        sample for pending in data for sample in pending.samples
+                    )
+                    await release_lazy_samples(
+                        sample
+                        for pending in completed_by_id.values()
+                        for sample in pending.for_training
+                    )
                     raise RuntimeError(
                         "Dressage fully async rollout dropped too many failed groups "
                         f"after exhausted retries ({dropped_failed_groups}); "
@@ -553,6 +585,7 @@ async def generate_rollout_async(
                 group = completed.result
 
             if not staleness_filter.keep_group(group_id, group, logger):
+                await release_lazy_samples(group)
                 last_progress_time = time.time()
                 continue
             data.append(PendingGroup(group_id=group_id, samples=group))
@@ -570,11 +603,19 @@ async def generate_rollout_async(
         if len(data) < target_data_size:
             await asyncio.sleep(0.01)
 
+    await release_lazy_samples(
+        sample
+        for completed in completed_by_id.values()
+        for sample in completed.for_training
+    )
     data_groups = [group.samples for group in data]
     data_groups = sorted(data_groups, key=lambda group: getattr(group[0], "index", 0))
+    for group in data_groups:
+        bind_training_batch(group, rollout_id)
     if not _allow_empty_train_batch() and not any(
         _group_has_trainable_tokens(group) for group in data_groups
     ):
+        await release_lazy_samples(sample for group in data_groups for sample in group)
         summaries = [
             _group_failure_summary(group)
             for group in data_groups[: min(3, len(data_groups))]

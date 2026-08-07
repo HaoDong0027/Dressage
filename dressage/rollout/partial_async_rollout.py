@@ -49,6 +49,8 @@ from dressage.rollout.staleness import (
     config_from_args,
 )
 from dressage.rollout.prewarm.scheduler import PrewarmScheduler
+from dressage.transport.client import release_lazy_samples
+from dressage.transport.payload import bind_training_batch
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +81,10 @@ class CompletedGroup:
         if self.result is None:
             return True
         return _is_aborted_group(self.result)
+
+    @property
+    def for_training(self) -> list[Any]:
+        return self.result if self.result is not None else self.original_group
 
 
 def _state_for(args: Any):
@@ -162,6 +168,7 @@ def _annotate_returned_group(group: list[Any], *, group_id: int, rollout_id: int
         metadata["dressage_return_rollout_id"] = rollout_id
         metadata["dressage_return_async_group_id"] = group_id
         metadata["dressage_partial_rollout_returned"] = True
+    bind_training_batch(group, rollout_id)
 
 
 def _partial_target_groups(args: Any) -> int:
@@ -290,9 +297,11 @@ class PartialAsyncRolloutWorker:
                     group_id, group = active.pop(task)
                     try:
                         result = _flatten_multi_segment_result(task.result())
-                        self._put_completed(CompletedGroup(group_id, original_group=group, result=result))
+                        completed = CompletedGroup(group_id, group, result=result)
                     except BaseException as exc:
-                        self._put_completed(CompletedGroup(group_id, original_group=group, error=exc))
+                        completed = CompletedGroup(group_id, group, error=exc)
+                    if not self._put_completed(completed):
+                        await release_lazy_samples(completed.for_training)
                     # Release this group's unconsumed pre-warm entries (if any)
                     # immediately after completion, without waiting for shutdown.
                     await self._scheduler.cleanup_group(group_id)
@@ -328,15 +337,26 @@ class PartialAsyncRolloutWorker:
             # block in blackbox_dispatch calls schedule_terminate_paddock to
             # release claimed sandboxes; drain_lifecycle_tasks below waits
             # for all background lifecycle cleanup to finish.
+            queued = self.get_completed_groups()
+            discarded = [
+                sample
+                for completed in queued
+                for sample in completed.for_training
+            ]
             if active:
                 for task in active:
                     task.cancel()
                 await asyncio.gather(*active.keys(), return_exceptions=True)
                 for task, (group_id, group) in active.items():
+                    try:
+                        discarded.extend(_flatten_multi_segment_result(task.result()))
+                    except BaseException:
+                        discarded.extend(group)
                     await self._scheduler.cleanup_group(group_id)
 
             await self._scheduler.cleanup()
             await drain_lifecycle_tasks()
+            await release_lazy_samples(discarded)
             logger.info("Dressage partial async rollout worker stopped")
 
     async def _run_group(self, group: list[Any], sampling_params: dict[str, Any]) -> list[Any]:
@@ -349,11 +369,11 @@ class PartialAsyncRolloutWorker:
             evaluation=False,
         )
 
-    def _put_completed(self, item: CompletedGroup) -> None:
+    def _put_completed(self, item: CompletedGroup) -> bool:
         while True:
             try:
                 self.output_queue.put(item, timeout=0.1)
-                return
+                return True
             except queue.Full:
                 if not self.running:
                     logger.warning(
@@ -361,7 +381,7 @@ class PartialAsyncRolloutWorker:
                         "output queue is full while the worker is stopping",
                         item.group_id,
                     )
-                    return
+                    return False
 
     def get_completed_groups(self) -> list[CompletedGroup]:
         completed: list[CompletedGroup] = []
@@ -468,9 +488,16 @@ async def generate_rollout_partial_async_impl(
         completed_groups = worker.get_completed_groups()
         advanced_version = staleness_filter.observe_completed(completed_groups)
         if advanced_version and data:
-            previous_count = len(data)
+            previous_data = data
             data = staleness_filter.filter_pending(data, logger)
-            if len(data) != previous_count:
+            if len(data) != len(previous_data):
+                kept_ids = {group.group_id for group in data}
+                await release_lazy_samples(
+                    sample
+                    for group in previous_data
+                    if group.group_id not in kept_ids
+                    for sample in group.samples
+                )
                 last_progress_time = time.time()
 
         for completed in completed_groups:
@@ -484,6 +511,7 @@ async def generate_rollout_partial_async_impl(
                 break
             completed = completed_by_id.pop(group_id)
             if completed.is_failed:
+                await release_lazy_samples(completed.for_training)
                 failed_group = completed.result or completed.original_group
                 staleness_failure = _group_has_staleness_failure(
                     failed_group,
@@ -514,6 +542,14 @@ async def generate_rollout_partial_async_impl(
                     summary,
                 )
                 if dropped_failed_groups >= max_dropped_failed_groups:
+                    await release_lazy_samples(
+                        sample for pending in data for sample in pending.samples
+                    )
+                    await release_lazy_samples(
+                        sample
+                        for pending in completed_by_id.values()
+                        for sample in pending.for_training
+                    )
                     raise RuntimeError(
                         "Dressage partial async rollout dropped too many failed groups "
                         f"after exhausted retries ({dropped_failed_groups}); "
@@ -526,6 +562,7 @@ async def generate_rollout_partial_async_impl(
                 group = completed.result
 
             if not staleness_filter.keep_group(group_id, group, logger):
+                await release_lazy_samples(group)
                 last_progress_time = time.time()
                 continue
             _annotate_returned_group(group, group_id=group_id, rollout_id=rollout_id)
@@ -547,6 +584,11 @@ async def generate_rollout_partial_async_impl(
     if completed_by_id:
         leftovers = list(completed_by_id.values())
         if drain_final_worker:
+            await release_lazy_samples(
+                sample
+                for completed in leftovers
+                for sample in completed.for_training
+            )
             drained_completed_groups += len(leftovers)
             logger.info(
                 "dropping %d extra completed partial rollout groups after final rollout",
@@ -563,6 +605,9 @@ async def generate_rollout_partial_async_impl(
         )
         drained = stop_global_partial_worker()
         drained_completed_groups += len(drained)
+        await release_lazy_samples(
+            sample for completed in drained for sample in completed.for_training
+        )
         if drained:
             logger.info(
                 "drained %d completed partial rollout groups after final rollout",
@@ -574,6 +619,7 @@ async def generate_rollout_partial_async_impl(
     if not _allow_empty_train_batch() and not any(
         _group_has_trainable_tokens(group) for group in data_groups
     ):
+        await release_lazy_samples(sample for group in data_groups for sample in group)
         summaries = [
             _group_failure_summary(group)
             for group in data_groups[: min(3, len(data_groups))]

@@ -17,6 +17,12 @@ import ray
 
 from dressage.config import proxy_url
 from dressage.proxy.proxy_client import ProxyClient
+from dressage.training.tq_megatron_actor import TQMegatronTrainRayActor
+from dressage.transport.client import clear_training_batch
+from dressage.transport.payload import (
+    transfer_queue_enabled,
+    validate_transfer_queue_training_args,
+)
 from slime.ray.placement_group import (
     create_placement_groups,
     create_rollout_manager,
@@ -115,6 +121,8 @@ def _safe_update_weights(actor_model: Any, *, reason: str) -> Any:
 
 def train(args):
     assert not args.colocate, "Colocation is not supported for async training."
+    use_transfer_queue = transfer_queue_enabled()
+    validate_transfer_queue_training_args(args)
 
     configure_logger()
     pgs = create_placement_groups(args)
@@ -125,7 +133,15 @@ def train(args):
     router_addr = ray.get(rollout_manager.get_metrics_router_addr.remote())
     update_tracking_open_metrics(args, router_addr)
 
-    actor_model, critic_model = create_training_models(args, pgs, rollout_manager)
+    if use_transfer_queue:
+        actor_model, critic_model = create_training_models(
+            args,
+            pgs,
+            rollout_manager,
+            actor_cls=TQMegatronTrainRayActor,
+        )
+    else:
+        actor_model, critic_model = create_training_models(args, pgs, rollout_manager)
 
     # Always push actor weights to rollout once weights are loaded. No rollout should
     # be active yet, but keeping the wrapper here makes the update path consistent.
@@ -142,15 +158,34 @@ def train(args):
         if rollout_id + 1 < args.num_rollout:
             rollout_data_next_future = rollout_manager.generate.remote(rollout_id + 1)
 
-        if args.use_critic:
-            actor_trains_this_step = rollout_id >= args.num_critic_only_steps
-            value_refs = critic_model.async_train(rollout_id, rollout_data_curr_ref)
-            if actor_trains_this_step:
-                ray.get(actor_model.async_train(rollout_id, rollout_data_curr_ref, external_data=value_refs))
+        training_succeeded = False
+        try:
+            if args.use_critic:
+                actor_trains_this_step = rollout_id >= args.num_critic_only_steps
+                value_refs = critic_model.async_train(rollout_id, rollout_data_curr_ref)
+                if actor_trains_this_step:
+                    ray.get(
+                        actor_model.async_train(
+                            rollout_id,
+                            rollout_data_curr_ref,
+                            external_data=value_refs,
+                        )
+                    )
+                else:
+                    ray.get(value_refs)
             else:
-                ray.get(value_refs)
-        else:
-            ray.get(actor_model.async_train(rollout_id, rollout_data_curr_ref))
+                ray.get(actor_model.async_train(rollout_id, rollout_data_curr_ref))
+            training_succeeded = True
+        finally:
+            if use_transfer_queue:
+                try:
+                    clear_training_batch(rollout_id)
+                except Exception:
+                    if training_succeeded:
+                        raise
+                    logger.exception(
+                        "Failed to clear TransferQueue batch after training failure"
+                    )
 
         if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
             if (not args.use_critic) or rollout_id >= args.num_critic_only_steps:

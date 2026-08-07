@@ -945,6 +945,7 @@ def test_integration_capabilities_require_auth_and_report_version():
         "weight_version_source": "worker_snapshot",
         "weight_version_worker_count": 1,
         "supports_expected_version": True,
+        "transfer_queue_enabled": False,
     }
 
 

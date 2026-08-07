@@ -93,6 +93,8 @@ PROXY_ARGS=(
    --context-window "${CONTEXT_WINDOW}"
 )
 
+dressage_append_transfer_queue_proxy_args
+
 CKPT_ARGS=(
    --hf-checkpoint "${BASE_FOLDER}/Qwen3.5-35B-A3B"
    --ref-load "${BASE_FOLDER}/Qwen3.5-35B-A3B_torch_dist"
@@ -209,7 +211,7 @@ if [[ -f "${PROXY_PID_FILE}" ]]; then
   fi
 fi
 
-if [[ ! -f "${PROXY_PID_FILE}" ]]; then
+if [[ ! -f "${PROXY_PID_FILE}" && "${DRESSAGE_ENABLE_TRANSFER_QUEUE}" != "1" ]]; then
   cd "${REPO_ROOT}"
   python3 -m dressage.proxy.server "${PROXY_ARGS[@]}" >"${PROXY_LOG_FILE}" 2>&1 &
   echo $! > "${PROXY_PID_FILE}"
@@ -217,25 +219,28 @@ if [[ ! -f "${PROXY_PID_FILE}" ]]; then
 fi
 
 cleanup() {
-  if [[ -f "${PROXY_PID_FILE}" ]]; then
-    PROXY_PID="$(cat "${PROXY_PID_FILE}")"
-    kill "${PROXY_PID}" 2>/dev/null || true
-    rm -f "${PROXY_PID_FILE}"
-  fi
+    dressage_stop_memory_monitor
+    if [[ -f "${PROXY_PID_FILE}" ]]; then
+        PROXY_PID="$(cat "${PROXY_PID_FILE}")"
+        kill "${PROXY_PID}" 2>/dev/null || true
+        rm -f "${PROXY_PID_FILE}"
+    fi
 }
 trap cleanup EXIT
 
-for i in $(seq 1 60); do
-  if curl -sf "${DRESSAGE_PROXY_URL}/health" >/dev/null 2>&1; then
-    echo "Dressage proxy is healthy"
-    break
-  fi
-  if [[ "${i}" -eq 60 ]]; then
-    echo "Dressage proxy failed health check; see ${PROXY_LOG_FILE}" >&2
-    exit 1
-  fi
-  sleep 1
-done
+if [[ "${DRESSAGE_ENABLE_TRANSFER_QUEUE}" != "1" ]]; then
+    for i in $(seq 1 60); do
+      if curl -sf "${DRESSAGE_PROXY_URL}/health" >/dev/null 2>&1; then
+        echo "Dressage proxy is healthy"
+        break
+      fi
+      if [[ "${i}" -eq 60 ]]; then
+        echo "Dressage proxy failed health check; see ${PROXY_LOG_FILE}" >&2
+        exit 1
+      fi
+      sleep 1
+    done
+fi
 
 export no_proxy="127.0.0.1,localhost,${MASTER_ADDR},${PROXY_PUBLIC_HOST},${SGLANG_ROUTER_HOST}"
 cd "${SLIME_ROOT}"
@@ -253,6 +258,29 @@ if [ -n "${HOSTFILE}" ]; then
   wait
 fi
 
+if [[ "${DRESSAGE_ENABLE_TRANSFER_QUEUE}" == "1" && ! -f "${PROXY_PID_FILE}" ]]; then
+    cd "${REPO_ROOT}"
+    python3 -m dressage.proxy.server "${PROXY_ARGS[@]}" >"${PROXY_LOG_FILE}" 2>&1 &
+    echo $! > "${PROXY_PID_FILE}"
+    echo "Started Dressage proxy with TransferQueue: pid=$(cat "${PROXY_PID_FILE}") log=${PROXY_LOG_FILE}"
+fi
+
+if [[ "${DRESSAGE_ENABLE_TRANSFER_QUEUE}" == "1" ]]; then
+    for i in $(seq 1 60); do
+      if curl -sf "${DRESSAGE_PROXY_URL}/health" >/dev/null 2>&1; then
+        echo "Dressage proxy is healthy"
+        break
+      fi
+      if [[ "${i}" -eq 60 ]]; then
+        echo "Dressage proxy failed health check; see ${PROXY_LOG_FILE}" >&2
+        exit 1
+      fi
+      sleep 1
+    done
+fi
+
+dressage_start_memory_monitor
+
 RUNTIME_ENV_JSON=$(cat <<EOF_JSON
 {
   "env_vars": {
@@ -264,6 +292,7 @@ RUNTIME_ENV_JSON=$(cat <<EOF_JSON
     "CUDA_DEVICE_MAX_CONNECTIONS": "1",
     "NCCL_NVLS_ENABLE": "${HAS_NVLINK}",
     "DRESSAGE_PROXY_URL": "${DRESSAGE_PROXY_URL}",
+    "DRESSAGE_ENABLE_TRANSFER_QUEUE": "${DRESSAGE_ENABLE_TRANSFER_QUEUE}",
     "DRESSAGE_PADDOCK_MODE": "${DRESSAGE_PADDOCK_MODE}",
     "DRESSAGE_SANDBOX_PROVIDER": "${DRESSAGE_SANDBOX_PROVIDER}",
     "DRESSAGE_BLACKBOX_MAX_STEPS": "${DRESSAGE_BLACKBOX_MAX_STEPS}",
@@ -278,9 +307,15 @@ RUNTIME_ENV_JSON=$(cat <<EOF_JSON
 EOF_JSON
 )
 
+if [[ "${DRESSAGE_ENABLE_TRANSFER_QUEUE}" == "1" ]]; then
+    TRAIN_COMMAND=(python3 -m dressage.training.tq_train)
+else
+    TRAIN_COMMAND=(python3 train.py)
+fi
+
 ray job submit --address="http://127.0.0.1:8265" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \
-   -- python3 train.py \
+   -- "${TRAIN_COMMAND[@]}" \
    --actor-num-nodes "${ACTOR_NUM_NODES}" \
    --actor-num-gpus-per-node "${ACTOR_NUM_GPUS_PER_NODE}" \
    --colocate \

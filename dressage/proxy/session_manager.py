@@ -71,6 +71,17 @@ class SessionPrefixTree:
         self._by_fingerprint.setdefault(fingerprint, set()).add(step.step_id)
         self._all_step_ids.append(step.step_id)
 
+    def remove(self, step_id: str) -> None:
+        fingerprint = self._fingerprint_by_step_id.pop(step_id, None)
+        if fingerprint is not None:
+            step_ids = self._by_fingerprint[fingerprint]
+            step_ids.discard(step_id)
+            if not step_ids:
+                self._by_fingerprint.pop(fingerprint)
+        self._all_step_ids = [
+            candidate for candidate in self._all_step_ids if candidate != step_id
+        ]
+
     def candidates(self, current_messages: list[dict[str, Any]]) -> list[str]:
         candidates: list[str] = []
         seen: set[str] = set()
@@ -130,7 +141,6 @@ class StepRecord:
     concat_output_token_count: int = 0
     concat_logprobs_invalid: bool = False
     concat_incremental_tokenization_failed: bool = False
-    response_routed_experts: str | None = None
     response_routed_experts_chunks: list[dict[str, Any]] = field(default_factory=list)
     tools: list[dict[str, Any]] | None = None
     segment_boundary_before: bool = False
@@ -435,7 +445,6 @@ class SessionManager:
         concat_output_token_count: int = 0,
         concat_logprobs_invalid: bool = False,
         concat_incremental_tokenization_failed: bool = False,
-        response_routed_experts: str | None = None,
         response_routed_experts_chunks: list[dict[str, Any]] | None = None,
         tools: list[dict[str, Any]] | None = None,
         segment_boundary_before: bool = False,
@@ -518,7 +527,6 @@ class SessionManager:
                 concat_incremental_tokenization_failed=(
                     concat_incremental_tokenization_failed
                 ),
-                response_routed_experts=response_routed_experts,
                 response_routed_experts_chunks=[
                     dict(item) for item in (response_routed_experts_chunks or [])
                 ],
@@ -531,18 +539,57 @@ class SessionManager:
                 request_version=request_version,
                 response_version=response_version,
             )
-            session.steps.append(step)
-            session.steps_by_id[step.step_id] = step
-            if step.normalized_messages_snapshot:
-                session.prefix_tree.insert(step)
-            lineage = session.lineages.get(step.lineage_id)
-            if lineage is not None:
-                lineage.latest_step_id = step.step_id
-            session.last_active = time.time()
+            self._attach_step(session, step)
+            return step
+
+    @staticmethod
+    def _attach_step(session: Session, step: StepRecord) -> None:
+        session.steps.append(step)
+        session.steps_by_id[step.step_id] = step
+        if step.normalized_messages_snapshot:
+            session.prefix_tree.insert(step)
+        lineage = session.lineages.get(step.lineage_id)
+        if lineage is not None:
+            lineage.latest_step_id = step.step_id
+        session.last_active = time.time()
+
+    def attach_step(self, session_id: str, step: StepRecord) -> StepRecord | None:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                logger.warning(
+                    "dropping trajectory step for missing session %s after "
+                    "possible stale-cleanup race",
+                    session_id,
+                )
+                return None
+            self._attach_step(session, step)
             return step
 
     def record_turn(self, **kwargs: Any) -> None:
         self.record_step(**kwargs)
+
+    def rollback_step(self, session_id: str, step_id: str) -> None:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return
+            step = session.steps_by_id.pop(step_id, None)
+            if step is None:
+                return
+            session.steps = [item for item in session.steps if item.step_id != step_id]
+            session.prefix_tree.remove(step_id)
+            lineage = session.lineages.get(step.lineage_id)
+            if lineage is not None and lineage.latest_step_id == step_id:
+                lineage.latest_step_id = next(
+                    (
+                        item.step_id
+                        for item in reversed(session.steps)
+                        if item.lineage_id == step.lineage_id
+                    ),
+                    None,
+                )
+            session.last_active = time.time()
 
     def mark_history_rewritten(self, session_id: str, reason: str) -> None:
         with self._lock:
@@ -578,6 +625,10 @@ class SessionManager:
                 if result is not None:
                     self._finalization_results[session_id] = copy.deepcopy(result)
             return session
+
+    def discard_session(self, session_id: str) -> Session | None:
+        with self._lock:
+            return self._sessions.pop(session_id, None)
 
     def active_count(self) -> int:
         with self._lock:

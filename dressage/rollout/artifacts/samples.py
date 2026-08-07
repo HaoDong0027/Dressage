@@ -220,13 +220,18 @@ def _segment_masks_nonlast_version_tokens(segment: dict[str, Any]) -> bool:
 
 def _segment_arrays(
     segment: dict[str, Any],
-) -> tuple[list[Any], list[int], list[float], list[str] | None]:
+) -> tuple[list[Any], list[int], list[float] | None, list[str] | None]:
     tokens = _required_segment_list(segment, "tokens")
     full_loss_mask = _normalize_segment_loss_mask(
         _required_segment_list(segment, "full_loss_mask")
     )
-    full_logprobs = _normalize_segment_logprobs(
-        _required_segment_list(segment, "full_logprobs")
+    raw_logprobs = segment.get("full_logprobs")
+    full_logprobs = (
+        None
+        if raw_logprobs is None
+        else _normalize_segment_logprobs(
+            _required_segment_list(segment, "full_logprobs")
+        )
     )
     raw_versions = segment.get("full_versions")
     full_versions = (
@@ -240,7 +245,11 @@ def _segment_arrays(
         raise ValueError(
             f"tokens length {len(tokens)} != full_loss_mask length {len(full_loss_mask)}"
         )
-    if len(tokens) != len(full_logprobs):
+    if full_logprobs is None and segment.get("training_payload_ref") is None:
+        raise ValueError(
+            "selected segment missing full_logprobs and training_payload_ref"
+        )
+    if full_logprobs is not None and len(tokens) != len(full_logprobs):
         raise ValueError(
             "tokens length "
             f"{len(tokens)} != full_logprobs length {len(full_logprobs)}"
@@ -280,7 +289,8 @@ def write_sample_from_segment(
     if truncated:
         tokens = tokens[:token_cap]
         full_loss_mask = full_loss_mask[:token_cap]
-        full_logprobs = full_logprobs[:token_cap]
+        if full_logprobs is not None:
+            full_logprobs = full_logprobs[:token_cap]
         if full_versions is not None:
             full_versions = full_versions[:token_cap]
         logger.warning(
@@ -305,12 +315,17 @@ def write_sample_from_segment(
     sample.tokens = tokens
     sample.response_length = response_length
     sample.loss_mask = train_full_loss_mask[response_start:]
-    sample.rollout_log_probs = full_logprobs[response_start:]
+    sample.rollout_log_probs = (
+        None if full_logprobs is None else full_logprobs[response_start:]
+    )
     if len(sample.loss_mask) != response_length:
         raise ValueError(
             f"loss_mask length {len(sample.loss_mask)} != response_length {response_length}"
         )
-    if len(sample.rollout_log_probs) != response_length:
+    if (
+        sample.rollout_log_probs is not None
+        and len(sample.rollout_log_probs) != response_length
+    ):
         raise ValueError(
             "rollout_log_probs length "
             f"{len(sample.rollout_log_probs)} != response_length {response_length}"
@@ -347,28 +362,51 @@ def write_sample_from_segment(
     ]
     if truncated:
         sample.metadata["truncated"] = True
-    routed_experts = extract_routed_experts(
-        segment,
-        args,
-        expected_token_count=len(tokens),
-    )
-    if routed_experts is not None:
-        expected_len = len(tokens) - 1
-        if routed_experts.shape[0] > expected_len:
-            routed_experts = routed_experts[:expected_len]
-        if routed_experts.shape[0] != expected_len:
-            logger.warning(
-                "routed_experts length %d != expected %d; skipping R3",
-                routed_experts.shape[0], expected_len,
+    from dressage.transport.payload import TRAINING_PAYLOAD_METADATA_KEY
+
+    sample.metadata.pop(TRAINING_PAYLOAD_METADATA_KEY, None)
+    payload_ref = segment.get("training_payload_ref")
+    if payload_ref is not None:
+        from dressage.transport.payload import TrainingPayloadRef
+
+        stored_ref = TrainingPayloadRef.from_dict(payload_ref)
+        if stored_ref.token_count != origin_tokens_len:
+            raise ValueError(
+                "training payload token count does not match selected segment"
             )
-            routed_experts = None
-    if routed_experts is not None:
-        sample.rollout_routed_experts = routed_experts
-    elif getattr(args, "use_rollout_routing_replay", False):
-        raise ValueError(
-            "use_rollout_routing_replay is enabled but segment contains no routed_experts. "
-            "Pass --use-rollout-routing-replay when starting the Dressage proxy."
+        if (
+            getattr(args, "use_rollout_routing_replay", False)
+            and (
+                len(stored_ref.routed_experts_shape) != 2
+                or stored_ref.routed_experts_shape[0] < len(tokens) - 1
+            )
+        ):
+            raise ValueError(
+                "use_rollout_routing_replay is enabled but training payload contains no routed_experts"
+            )
+        sample.metadata[TRAINING_PAYLOAD_METADATA_KEY] = TrainingPayloadRef(
+            payload_key=stored_ref.payload_key,
+            trajectory_id=stored_ref.trajectory_id,
+            segment_id=stored_ref.segment_id,
+            token_count=len(tokens),
+            response_start=response_start,
+            response_length=response_length,
+            routed_experts_shape=stored_ref.routed_experts_shape,
+        ).to_dict()
+        sample.rollout_routed_experts = None
+    else:
+        routed_experts = extract_routed_experts(
+            segment,
+            args,
+            expected_token_count=len(tokens),
         )
+        if routed_experts is not None:
+            sample.rollout_routed_experts = routed_experts
+        elif getattr(args, "use_rollout_routing_replay", False):
+            raise ValueError(
+                "use_rollout_routing_replay is enabled but segment contains no routed_experts. "
+                "Pass --use-rollout-routing-replay when starting the Dressage proxy."
+            )
 
     finish_reason = str(segment.get("finish_reason") or "stop")
     set_status(sample, "TRUNCATED" if finish_reason == "length" else "COMPLETED")
@@ -396,61 +434,24 @@ def extract_routed_experts(
             dtype=np.int32,
         ).reshape(-1, num_layers, moe_router_topk)
 
-    def slice_generated(
-        full_array: Any,
-        prefix_count: int,
-        output_count: int,
-        is_first: bool,
-    ) -> Any:
-        if is_first:
-            return full_array[:prefix_count + output_count - 1]
-        start = prefix_count - 1
-        return full_array[start:start + output_count]
-
-    def combine_chunks(chunks_info: list[dict[str, Any]]) -> Any:
-        slices = [
-            slice_generated(
-                decode(chunk["data"]),
-                int(chunk["prefix_token_count"]),
-                int(chunk["output_token_count"]),
-                bool(chunk.get("is_first_chunk")),
-            )
-            for chunk in chunks_info
-        ]
-        return np.concatenate(slices, axis=0) if slices else None
-
-    def check_min_length(result: Any) -> Any:
-        if expected_token_count > 0 and result.shape[0] < expected_token_count - 1:
-            logger.warning(
-                "routed_experts too short: got %d, expected >= %d; skipping R3",
-                result.shape[0], expected_token_count - 1,
-            )
-            return None
-        return result
-
     chunks_info = segment.get("routed_experts_chunks")
-    if chunks_info:
-        return check_min_length(combine_chunks(chunks_info))
-
-    raw = segment.get("routed_experts")
-    if raw is not None and isinstance(raw, str):
-        return check_min_length(decode(raw))
-
-    parts_info = segment.get("routed_experts_parts")
-    if not parts_info:
+    if not chunks_info:
         return None
 
-    slices = []
-    for part in parts_info:
-        if part.get("chunks"):
-            step_array = combine_chunks(part["chunks"])
-        else:
-            step_array = decode(part["data"])
-        prefix_count = int(part["prefix_token_count"])
-        concat_count = int(part["concat_token_count"])
-        is_first = bool(part.get("is_first_step"))
-        slices.append(slice_generated(step_array, prefix_count, concat_count, is_first))
-
-    if not slices:
-        return None
-    return check_min_length(np.concatenate(slices, axis=0))
+    arrays = []
+    for chunk in chunks_info:
+        decoded = decode(chunk["data"])
+        row_count = int(chunk["row_count"])
+        if decoded.shape[0] != row_count:
+            raise ValueError(
+                "routed_experts chunk row count does not match its payload: "
+                f"expected={row_count}, actual={decoded.shape[0]}"
+            )
+        arrays.append(decoded)
+    result = np.concatenate(arrays, axis=0)
+    if expected_token_count > 0 and result.shape[0] != expected_token_count - 1:
+        raise ValueError(
+            "routed_experts length does not match trajectory tokens: "
+            f"expected={expected_token_count - 1}, actual={result.shape[0]}"
+        )
+    return result

@@ -33,6 +33,7 @@ from dressage.paddock.blackbox.execute_hooks import (
 )
 from dressage.rollout.artifacts import samples as trajectory_sample
 from dressage.rollout.artifacts.writer import DEFAULT_WRITER, RolloutArtifactWriter
+from dressage.proxy.routed_experts import canonicalize_routed_experts
 
 
 @pytest.fixture(autouse=True)
@@ -606,15 +607,11 @@ def test_extract_routed_experts_combines_partial_last_step_chunks():
         "routed_experts_chunks": [
             {
                 "data": _encode_routed_experts([10, 11, 12, 13]),
-                "prefix_token_count": 3,
-                "output_token_count": 2,
-                "is_first_chunk": True,
+                "row_count": 4,
             },
             {
-                "data": _encode_routed_experts([20, 21, 22, 23, 24, 25]),
-                "prefix_token_count": 5,
-                "output_token_count": 2,
-                "is_first_chunk": False,
+                "data": _encode_routed_experts([24, 25]),
+                "row_count": 2,
             },
         ],
     }
@@ -629,41 +626,79 @@ def test_extract_routed_experts_combines_partial_last_step_chunks():
     assert routed.reshape(-1).tolist() == [10, 11, 12, 13, 24, 25]
 
 
-def test_extract_routed_experts_combines_partial_tito_parts():
-    args = SimpleNamespace(num_layers=1, moe_router_topk=1)
-    segment = {
-        "routed_experts_parts": [
+def test_canonicalize_routed_experts_removes_partial_prefix_replay():
+    import base64
+
+    import numpy as np
+
+    chunks = canonicalize_routed_experts(
+        [
             {
-                "prefix_token_count": 0,
-                "concat_token_count": 4,
-                "is_first_step": True,
-                "chunks": [
-                    {
-                        "data": _encode_routed_experts([1, 2]),
-                        "prefix_token_count": 2,
-                        "output_token_count": 1,
-                        "is_first_chunk": True,
-                    },
-                    {
-                        "data": _encode_routed_experts([90, 91, 3]),
-                        "prefix_token_count": 3,
-                        "output_token_count": 1,
-                        "is_first_chunk": False,
-                    },
-                ],
+                "data": _encode_routed_experts([0, 1, 2, 3]),
+                "prefix_token_count": 3,
+                "output_token_count": 2,
+                "is_first_chunk": True,
             },
             {
-                "prefix_token_count": 4,
-                "concat_token_count": 3,
-                "is_first_step": False,
-                "chunks": [
-                    {
-                        "data": _encode_routed_experts([10, 11, 12, 13, 14, 15]),
-                        "prefix_token_count": 6,
-                        "output_token_count": 1,
-                        "is_first_chunk": True,
-                    },
-                ],
+                "data": _encode_routed_experts([90, 91, 92, 93, 4, 5]),
+                "prefix_token_count": 5,
+                "output_token_count": 2,
+                "is_first_chunk": False,
+            },
+        ],
+        target_start=0,
+        target_count=6,
+    )
+    values = [
+        value
+        for chunk in chunks
+        for value in np.frombuffer(
+            base64.b64decode(chunk["data"]),
+            dtype=np.int32,
+        ).tolist()
+    ]
+
+    assert [chunk["row_count"] for chunk in chunks] == [4, 2]
+    assert values == [0, 1, 2, 3, 4, 5]
+
+
+def test_canonicalize_routed_experts_keeps_only_append_delta():
+    import base64
+
+    import numpy as np
+
+    chunks = canonicalize_routed_experts(
+        [
+            {
+                "data": _encode_routed_experts([0, 1, 2, 3, 4, 5]),
+                "prefix_token_count": 6,
+                "output_token_count": 1,
+                "is_first_chunk": True,
+            }
+        ],
+        target_start=3,
+        target_count=3,
+    )
+    values = np.frombuffer(
+        base64.b64decode(chunks[0]["data"]),
+        dtype=np.int32,
+    ).tolist()
+
+    assert chunks[0]["row_count"] == 3
+    assert values == [3, 4, 5]
+
+
+def test_extract_routed_experts_combines_incremental_tito_chunks():
+    args = SimpleNamespace(num_layers=1, moe_router_topk=1)
+    segment = {
+        "routed_experts_chunks": [
+            {
+                "data": _encode_routed_experts([1, 2, 3]),
+                "row_count": 3,
+            },
+            {
+                "data": _encode_routed_experts([13, 14, 15]),
+                "row_count": 3,
             },
         ],
     }

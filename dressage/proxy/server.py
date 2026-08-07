@@ -26,6 +26,11 @@ from dressage.config import (
     sglang_router_url as default_sglang_router_url,
     token_build_defaults,
 )
+from dressage.transport import (
+    TrajectoryBuildConfig,
+    TransferQueueRuntime,
+    start_transport_coordinator,
+)
 
 from .generation_controller import (
     GenerationController,
@@ -40,6 +45,7 @@ from .last_step import (
     create_default_mask_template_registry,
 )
 from .reasoning_parser import ProxyReasoningParser, canonicalize_reasoning_content
+from .routed_experts import canonicalize_routed_experts
 from .session_manager import Route, Session, SessionFinalizedError, SessionManager, StepRecord
 from .sglang_client import SGLangRouterClient
 from .tool_call_parser import (
@@ -152,7 +158,12 @@ def _real_token_version(value: Any) -> str | None:
     return version
 
 
-def _session_real_versions(session: Session) -> set[str]:
+def _session_real_versions(
+    session: Session,
+    transfer_queue_runtime: TransferQueueRuntime | None = None,
+) -> set[str]:
+    if transfer_queue_runtime is not None:
+        return transfer_queue_runtime.real_versions(session)
     versions: set[str] = set()
     for step in session.steps:
         values: list[Any] = []
@@ -177,7 +188,12 @@ def _ordered_real_versions(values: list[Any]) -> list[str]:
     return versions
 
 
-def _session_response_versions(session: Session) -> list[Any]:
+def _session_response_versions(
+    session: Session,
+    transfer_queue_runtime: TransferQueueRuntime | None = None,
+) -> list[Any]:
+    if transfer_queue_runtime is not None:
+        return transfer_queue_runtime.ordered_response_versions(session)
     values: list[Any] = []
     for step in session.steps:
         values.extend(step.response_versions)
@@ -190,11 +206,15 @@ def _raise_if_partial_version_span_exceeded(
     candidate_versions: list[Any],
     partial_rollout: bool,
     max_partial_rollout_preempts: int | None,
+    transfer_queue_runtime: TransferQueueRuntime | None = None,
 ) -> None:
     if not partial_rollout or max_partial_rollout_preempts is None:
         return
     versions = _ordered_real_versions(
-        [*_session_response_versions(session), *candidate_versions]
+        [
+            *_session_response_versions(session, transfer_queue_runtime),
+            *candidate_versions,
+        ]
     )
     version_span = len(versions)
     version_switches = max(0, version_span - 1)
@@ -235,10 +255,11 @@ def _raise_if_cross_version_trajectory(
     session: Session,
     candidate_versions: list[Any],
     partial_rollout: bool,
+    transfer_queue_runtime: TransferQueueRuntime | None = None,
 ) -> None:
     if partial_rollout:
         return
-    previous_versions = _session_real_versions(session)
+    previous_versions = _session_real_versions(session, transfer_queue_runtime)
     if not previous_versions:
         return
     new_versions = {
@@ -277,8 +298,14 @@ def _raise_if_stale_rollout_epoch(
     session: Session,
     current_epoch: int,
     partial_rollout: bool,
+    transfer_queue_runtime: TransferQueueRuntime | None = None,
 ) -> None:
-    if partial_rollout or not session.steps or session.rollout_epoch is None:
+    has_steps = (
+        transfer_queue_runtime.has_steps(session)
+        if transfer_queue_runtime is not None
+        else bool(session.steps)
+    )
+    if partial_rollout or not has_steps or session.rollout_epoch is None:
         return
     if session.rollout_epoch == current_epoch:
         return
@@ -599,6 +626,7 @@ def create_app(
     sglang_router_url: str | None = None,
     tokenizer_path: str | None = None,
     trajectory_store: TrajectoryStore | None = None,
+    transfer_queue_runtime: TransferQueueRuntime | None = None,
     session_manager: SessionManager | None = None,
     tokenizer: Any | None = None,
     sglang_client: SGLangRouterClient | None = None,
@@ -698,6 +726,64 @@ def create_app(
 
     trajectory_store = trajectory_store or TrajectoryStore()
     session_manager = session_manager or SessionManager()
+
+    async def _cleanup_expired_steps() -> None:
+        if transfer_queue_runtime is not None:
+            await transfer_queue_runtime.cleanup_expired(session_manager)
+
+    async def _record_step(session: Session, **values: Any) -> None:
+        if transfer_queue_runtime is None:
+            session_manager.record_step(session_id=session.session_id, **values)
+            return
+
+        async def commit() -> None:
+            step_ref, stored_step = await transfer_queue_runtime.persist_step(
+                session=session,
+                **values,
+            )
+            projection = None
+            try:
+                projection = session_manager.attach_step(
+                    session.session_id,
+                    transfer_queue_runtime.build_proxy_projection(stored_step),
+                )
+                if projection is None:
+                    raise RuntimeError(
+                        "session disappeared during TransferQueue commit"
+                    )
+                transfer_queue_runtime.commit_step(
+                    session=session,
+                    step_ref=step_ref,
+                    step=stored_step,
+                )
+            except BaseException:
+                if projection is not None:
+                    session_manager.rollback_step(
+                        session.session_id,
+                        projection.step_id,
+                    )
+                await transfer_queue_runtime.abort_step(step_ref)
+                raise
+
+        commit_task = asyncio.create_task(commit())
+        try:
+            await asyncio.shield(commit_task)
+        except asyncio.CancelledError:
+            try:
+                await commit_task
+            finally:
+                raise
+        except Exception as exc:
+            logger.exception("Failed to commit StepRecord to TransferQueue")
+            raise HTTPException(
+                status_code=503,
+                detail={"error": "transfer_queue_step_write_failed"},
+            ) from exc
+
+    def _trajectory_stats() -> dict[str, Any]:
+        if transfer_queue_runtime is not None:
+            return transfer_queue_runtime.stats()
+        return trajectory_store.stats()
     sglang_client = sglang_client or SGLangRouterClient(
         sglang_router_url,
         return_routed_experts=use_rollout_routing_replay,
@@ -722,6 +808,15 @@ def create_app(
         configure_tito_chat_template(tokenizer, model_type=tito_model)
         tito_tokenizer = create_tito_tokenizer(tokenizer, model_type=tito_model)
         effective_model_mask_type = None
+
+    transport_build_config = TrajectoryBuildConfig(
+        token_build_mode=token_build_mode,
+        token_build_model=token_build_model,
+        model_mask_type=effective_model_mask_type,
+        tokenizer_path=tokenizer_path,
+        record_token_versions=record_token_versions,
+        mask_nonlast_version_tokens=mask_nonlast_version_tokens,
+    )
 
     mask_template_registry = create_default_mask_template_registry()
     tool_call_registry = tool_call_parser_registry or create_default_tool_call_parser_registry()
@@ -864,6 +959,8 @@ def create_app(
         try:
             yield
         finally:
+            if transfer_queue_runtime is not None:
+                await transfer_queue_runtime.close(session_manager)
             await generation_controller.shutdown(timeout_seconds=5.0)
             await sglang_client.close()
 
@@ -963,8 +1060,6 @@ def create_app(
             record["full_versions"] = full_versions
         if base_step.response_routed_experts_chunks:
             record["routed_experts_chunks"] = base_step.response_routed_experts_chunks
-        if base_step.response_routed_experts is not None:
-            record["routed_experts"] = base_step.response_routed_experts
         return record
 
     def _build_step_snapshot_record(
@@ -1045,10 +1140,27 @@ def create_app(
         }
         if full_versions is not None:
             record["full_versions"] = full_versions
-        if step.response_routed_experts_chunks:
-            record["routed_experts_chunks"] = step.response_routed_experts_chunks
-        if step.response_routed_experts is not None:
-            record["routed_experts"] = step.response_routed_experts
+        routed_experts_chunks = list(step.response_routed_experts_chunks)
+        if token_build_mode_for_record == "tito":
+            lineage_steps = [
+                item for item in session.steps if item.lineage_id == step.lineage_id
+            ]
+            target_index = next(
+                index
+                for index, item in enumerate(lineage_steps)
+                if item.step_id == step.step_id
+            )
+            start_index = 0
+            for index, item in enumerate(lineage_steps[: target_index + 1]):
+                if item.lineage_segment_boundary_before:
+                    start_index = index
+            routed_experts_chunks = [
+                dict(chunk)
+                for item in lineage_steps[start_index : target_index + 1]
+                for chunk in item.response_routed_experts_chunks
+            ]
+        if routed_experts_chunks:
+            record["routed_experts_chunks"] = routed_experts_chunks
         return record
 
     def _normalize_logprobs_to_length(
@@ -1173,27 +1285,22 @@ def create_app(
         if record_token_versions:
             record["full_versions"] = full_versions
 
-        routed_experts_parts: list[dict[str, Any]] = []
-        accumulated_prefix_len = 0
-        for step_index, step in enumerate(steps):
-            if step.response_routed_experts_chunks or step.response_routed_experts is not None:
-                part = {
-                    "prefix_token_count": accumulated_prefix_len,
-                    "concat_token_count": len(step.concat_token_ids),
-                    "is_first_step": step_index == 0,
-                }
-                if step.response_routed_experts_chunks:
-                    part["chunks"] = step.response_routed_experts_chunks
-                if step.response_routed_experts is not None:
-                    part["data"] = step.response_routed_experts
-                routed_experts_parts.append(part)
-            accumulated_prefix_len += len(step.concat_token_ids)
-        if routed_experts_parts:
-            record["routed_experts_parts"] = routed_experts_parts
+        routed_experts_chunks = [
+            dict(chunk)
+            for step in steps
+            for chunk in step.response_routed_experts_chunks
+        ]
+        if routed_experts_chunks:
+            record["routed_experts_chunks"] = routed_experts_chunks
 
         return record
 
     def _lineage_tito_prefix_token_ids(session: Session, lineage_id: str) -> list[int]:
+        if transfer_queue_runtime is not None:
+            return transfer_queue_runtime.current_segment_prefix_tokens(
+                session,
+                lineage_id,
+            )
         lineage_steps = [step for step in session.steps if step.lineage_id == lineage_id]
         start_index = 0
         for index, step in enumerate(lineage_steps):
@@ -1217,7 +1324,7 @@ def create_app(
             template_kwargs=tito_template_kwargs,
         )
 
-    def _build_prompt_tokens(
+    async def _build_prompt_tokens(
         *,
         session: Session,
         route: Route,
@@ -1250,6 +1357,11 @@ def create_app(
             raise RuntimeError("TITO tokenizer is not initialized for tito mode.")
 
         if route.type == "branch":
+            if transfer_queue_runtime is not None:
+                base_step = await transfer_queue_runtime.read_step(
+                    session,
+                    base_step.step_id,
+                )
             prefix_tokens = list(base_step.snapshot_token_ids)
         else:
             prefix_tokens = _lineage_tito_prefix_token_ids(session, route.lineage_id)
@@ -1519,6 +1631,7 @@ def create_app(
 
         session_id = session.session_id
         async with session.request_lock:
+            await _cleanup_expired_steps()
             try:
                 session_manager.ensure_session_active(session_id, session)
             except SessionFinalizedError as exc:
@@ -1538,6 +1651,7 @@ def create_app(
                 session=session,
                 current_epoch=request_rollout_epoch,
                 partial_rollout=partial_rollout,
+                transfer_queue_runtime=transfer_queue_runtime,
             )
             normalized_request_messages = mask_builder.normalize_template_messages(messages)
             current_tools_hash = _tools_hash(
@@ -1547,7 +1661,8 @@ def create_app(
             append_only = (
                 previous_step is None
                 or session_manager.is_append_only_continuation(
-                    previous_step.messages_snapshot, messages
+                    previous_step.normalized_messages_snapshot,
+                    normalized_request_messages,
                 )
             )
             routing_render_failed = False
@@ -1621,7 +1736,7 @@ def create_app(
             if routing_render_failed:
                 lineage_segment_reasons_before.append("tito_routing_render_failed")
             lineage_segment_boundary_before = bool(lineage_segment_reasons_before)
-            prompt_payload = _build_prompt_tokens(
+            prompt_payload = await _build_prompt_tokens(
                 session=session,
                 route=route,
                 lineage_segment_boundary_before=lineage_segment_boundary_before,
@@ -1715,6 +1830,7 @@ def create_app(
                     generation_controller.current_version,
                 ],
                 partial_rollout=partial_rollout,
+                transfer_queue_runtime=transfer_queue_runtime,
             )
             try:
                 router_response = await generation_controller.generate_preemptible(
@@ -1823,6 +1939,7 @@ def create_app(
                 session=session,
                 candidate_versions=[*response_versions, response_version, request_version],
                 partial_rollout=partial_rollout,
+                transfer_queue_runtime=transfer_queue_runtime,
             )
             if not output_overflow:
                 _raise_if_partial_version_span_exceeded(
@@ -1830,6 +1947,7 @@ def create_app(
                     candidate_versions=response_versions,
                     partial_rollout=partial_rollout,
                     max_partial_rollout_preempts=max_partial_rollout_preempts,
+                    transfer_queue_runtime=transfer_queue_runtime,
                 )
             if session.rollout_epoch is None:
                 session.rollout_epoch = router_response.rollout_epoch
@@ -1927,8 +2045,37 @@ def create_app(
                     template_kwargs=tito_template_kwargs,
                 )
 
-            session_manager.record_step(
-                session_id=session_id,
+            if token_build_mode == "tito":
+                previous_prefix_count = (
+                    0
+                    if route.type in {"create", "branch"}
+                    or lineage_segment_boundary_before
+                    else len(
+                        _lineage_tito_prefix_token_ids(
+                            session,
+                            route.lineage_id,
+                        )
+                    )
+                )
+                concat_token_count = len(concat_payload["concat_token_ids"])
+                if previous_prefix_count == 0:
+                    routed_experts_target_start = 0
+                    routed_experts_target_count = max(0, concat_token_count - 1)
+                else:
+                    routed_experts_target_start = previous_prefix_count - 1
+                    routed_experts_target_count = concat_token_count
+            else:
+                routed_experts_target_start = 0
+                routed_experts_target_count = max(0, len(recorded_all_token_ids) - 1)
+            response_routed_experts_chunks = canonicalize_routed_experts(
+                router_response.routed_experts_chunks,
+                target_start=routed_experts_target_start,
+                target_count=routed_experts_target_count,
+            )
+            router_response.routed_experts_chunks.clear()
+
+            await _record_step(
+                session,
                 turn_id=effective_turn_id,
                 request_messages=messages,
                 normalized_request_messages=normalized_request_messages,
@@ -1948,8 +2095,7 @@ def create_app(
                 raw_response_text=recorded_raw_text,
                 all_logprobs_invalid=router_response.all_logprobs_invalid,
                 **concat_payload,
-                response_routed_experts=router_response.routed_experts,
-                response_routed_experts_chunks=router_response.routed_experts_chunks,
+                response_routed_experts_chunks=response_routed_experts_chunks,
                 tools=tools,
                 segment_boundary_before=segment_boundary_before,
                 rewrite_reason=rewrite_reason,
@@ -2121,6 +2267,7 @@ def create_app(
     @app.post("/session/finalize")
     async def finalize_session(request: Request):
         _check_auth(request)
+        await _cleanup_expired_steps()
         body = await request.json()
         session_id = body["session_id"]
         instance_id = body.get("instance_id")
@@ -2163,7 +2310,28 @@ def create_app(
             trajectory_id = session.session_id
             finalization_id = uuid.uuid4().hex
             records: list[dict[str, Any]] = []
-            if token_build_mode == "tito":
+            transport_handle = None
+            if transfer_queue_runtime is not None:
+                lineage_segments = (
+                    _split_session_into_lineage_segments(session)
+                    if token_build_mode == "tito"
+                    else []
+                )
+                timeline_segments = _split_session_into_timeline_segments(session)
+                segment_count = (
+                    len(lineage_segments)
+                    if token_build_mode == "tito"
+                    else len(timeline_segments)
+                )
+                timeline_segment_count = len(timeline_segments)
+                transport_handle = await transfer_queue_runtime.seal_session(
+                    session=session,
+                    instance_id=effective_instance_id,
+                    finalization_id=finalization_id,
+                    label=label,
+                    build_config=transport_build_config.to_dict(),
+                )
+            elif token_build_mode == "tito":
                 lineage_segments = _split_session_into_lineage_segments(session)
                 timeline_segments = _split_session_into_timeline_segments(session)
                 for segment_index, segment in enumerate(lineage_segments):
@@ -2237,11 +2405,14 @@ def create_app(
                 "record_token_versions": record_token_versions,
                 "mask_nonlast_version_tokens": mask_nonlast_version_tokens,
             }
+            if transport_handle is not None:
+                finalization_result["transport"] = transport_handle
 
             # Record conversion validates every item before write_many enters
             # its one-lock commit.  The active Session is removed only after
             # the complete trajectory batch has been published.
-            trajectory_store.write_many(records)
+            if transfer_queue_runtime is None:
+                trajectory_store.write_many(records)
             finalized = session_manager.finalize_session(
                 session_id,
                 result=finalization_result,
@@ -2249,11 +2420,35 @@ def create_app(
             if finalized is not session:  # defensive; request_lock owns finalize
                 raise RuntimeError("session changed during atomic finalization")
 
+        if transfer_queue_runtime is not None:
+            transfer_queue_runtime.handoff_session(session_id)
         return finalization_result
+
+    @app.post("/session/discard")
+    async def discard_session(request: Request):
+        _check_auth(request)
+        body = await request.json()
+        session_id = body["session_id"]
+        if transfer_queue_runtime is None:
+            raise HTTPException(status_code=400, detail="TransferQueue is not enabled")
+
+        session = session_manager.get_session(session_id)
+        if session is None:
+            await transfer_queue_runtime.discard_session(session_id)
+        else:
+            async with session.request_lock:
+                await transfer_queue_runtime.discard_session(session_id)
+                session_manager.discard_session(session_id)
+        return {"success": True}
 
     @app.post("/trajectory/read")
     async def trajectory_read(request: Request):
         _check_auth(request)
+        if transfer_queue_runtime is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="Direct trajectory reads are unavailable with TransferQueue",
+            )
         body = await request.json()
         trajectory_id = _trajectory_id_from_body(body)
         instance_id = body.get("instance_id")
@@ -2284,7 +2479,7 @@ def create_app(
                 "success": bool(data),
                 "mode": "trajectory",
                 "data": data,
-                "meta_info": trajectory_store.stats(),
+                "meta_info": _trajectory_stats(),
                 "drained": drain,
             }
 
@@ -2293,13 +2488,14 @@ def create_app(
             "success": bool(data),
             "mode": "batch",
             "data": data,
-            "meta_info": trajectory_store.stats(),
+            "meta_info": _trajectory_stats(),
         }
 
     @app.get("/trajectory/stats")
     async def trajectory_stats(request: Request):
         _check_auth(request)
-        return trajectory_store.stats()
+        await _cleanup_expired_steps()
+        return _trajectory_stats()
 
     @app.post("/v1/rollout/pause")
     async def pause_rollout(request: Request):
@@ -2388,14 +2584,16 @@ def create_app(
             "weight_version_source": weight_version_source,
             "weight_version_worker_count": weight_version_worker_count,
             "supports_expected_version": True,
+            "transfer_queue_enabled": transfer_queue_runtime is not None,
         }
 
     @app.get("/health")
     async def health():
+        await _cleanup_expired_steps()
         return {
             "status": "ok",
             "active_sessions": session_manager.active_count(),
-            "store": trajectory_store.stats(),
+            "store": _trajectory_stats(),
             "rollout_pause": generation_controller.state(),
             "config": {
                 "sglang_router_url": sglang_router_url,
@@ -2413,6 +2611,7 @@ def create_app(
                 "stream_heartbeat_interval_seconds": (
                     stream_heartbeat_interval_seconds
                 ),
+                "transfer_queue_enabled": transfer_queue_runtime is not None,
             },
         }
 
@@ -2480,6 +2679,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--session-timeout", type=float, default=3200.0)
     parser.add_argument("--group-timeout", type=float, default=300.0)
     parser.add_argument(
+        "--enable-transfer-queue",
+        action="store_true",
+        help="Store trajectory StepRecords in TransferQueue for lazy assembly.",
+    )
+    parser.add_argument(
+        "--transfer-queue-config",
+        help="TransferQueue YAML config, required when TransferQueue is enabled.",
+    )
+    parser.add_argument(
+        "--transfer-queue-retention-seconds",
+        type=float,
+        default=86400.0,
+    )
+    parser.add_argument(
         "--token-build-mode",
         choices=("snapshot", "tito"),
         default="tito",
@@ -2530,12 +2743,44 @@ def parse_args() -> argparse.Namespace:
             "keeps the legacy respond-after-completion behavior."
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.enable_transfer_queue and not args.transfer_queue_config:
+        parser.error("--transfer-queue-config is required with --enable-transfer-queue")
+    if args.transfer_queue_retention_seconds <= 0:
+        parser.error("--transfer-queue-retention-seconds must be greater than 0")
+    return args
 
 
 def main() -> None:
     args = parse_args()
     logging.basicConfig(level=logging.INFO)
+
+    transfer_queue_runtime = None
+    if args.enable_transfer_queue:
+        build_defaults = token_build_defaults(
+            token_build_mode=args.token_build_mode,
+            token_build_model=args.token_build_model,
+        )
+        effective_mask_type = args.model_mask_type or build_defaults.model_mask_type
+        if args.token_build_mode == "tito":
+            effective_mask_type = None
+        transport_info = start_transport_coordinator(
+            config_path=args.transfer_queue_config,
+            build_config=TrajectoryBuildConfig(
+                token_build_mode=args.token_build_mode,
+                token_build_model=args.token_build_model,
+                model_mask_type=effective_mask_type,
+                tokenizer_path=args.tokenizer_path,
+                record_token_versions=args.record_token_versions,
+                mask_nonlast_version_tokens=args.mask_nonlast_version_tokens,
+            ),
+        )
+        transfer_queue_runtime = TransferQueueRuntime.from_config(
+            args.transfer_queue_config,
+            store_id=transport_info["store_id"],
+            transport_info=transport_info,
+            retention_seconds=args.transfer_queue_retention_seconds,
+        )
 
     app = create_app(
         sglang_router_url=args.sglang_router_url,
@@ -2543,6 +2788,7 @@ def main() -> None:
         trajectory_store=TrajectoryStore(
             min_group_size=args.min_group_size, group_timeout=args.group_timeout
         ),
+        transfer_queue_runtime=transfer_queue_runtime,
         session_manager=SessionManager(session_timeout=args.session_timeout),
         model_tool_call_type=args.model_tool_call_type,
         tool_call_parse_backend=args.tool_call_parse_backend,

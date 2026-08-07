@@ -15,6 +15,10 @@ import pytest
 
 from dressage.rollout.multi_segment import mark_aborted_no_grad
 from dressage.rollout import convert_samples as cs
+from dressage.transport.payload import (
+    TRAINING_PAYLOAD_METADATA_KEY,
+    TrainingPayloadRef,
+)
 
 
 class _Status(Enum):
@@ -313,3 +317,75 @@ def test_aborted_no_grad_sample_passes_convert_samples():
     # Dead sample shares instance_id="p1" → same denom; harmless because
     # its loss_mask is zeroed so it contributes 0 to loss regardless.
     assert train_data["rollout_mask_sums"][1] == pytest.approx(0.5)
+
+
+def test_convert_samples_registers_lazy_transfer_queue_batch(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "dressage.transport.client.register_training_batch",
+        lambda batch_id, trajectory_ids, payload_keys: calls.append(
+            (batch_id, trajectory_ids, payload_keys)
+        ),
+    )
+    sample = _real_seg(
+        ptid="trajectory",
+        instance_id="instance",
+        mask=[1],
+        rollout_id=7,
+    )
+    payload_ref = TrainingPayloadRef(
+        payload_key="trajectory:finalization:lineage:0",
+        trajectory_id="trajectory",
+        segment_id="segment",
+        token_count=2,
+        response_start=1,
+        response_length=1,
+        routed_experts_shape=[1, 4],
+        batch_id=7,
+    ).to_dict()
+    sample.metadata[TRAINING_PAYLOAD_METADATA_KEY] = payload_ref
+    sample.rollout_log_probs = [-0.1]
+    sample.rollout_routed_experts = [1]
+
+    train_data = cs.convert_samples_to_train_data(
+        _traj_equal_args(),
+        [sample],
+    )
+
+    assert train_data["prompt"] == [payload_ref]
+    assert "rollout_log_probs" not in train_data
+    assert "rollout_routed_experts" not in train_data
+    assert calls == [
+        (
+            7,
+            ["trajectory"],
+            ["trajectory:finalization:lineage:0"],
+        )
+    ]
+
+
+def test_convert_samples_rejects_mopd_with_lazy_transfer_queue():
+    args = _traj_equal_args()
+    args.mopd_teacher_config = "teacher.yaml"
+    sample = _real_seg(
+        ptid="trajectory",
+        instance_id="instance",
+        mask=[1],
+        rollout_id=7,
+    )
+    sample.metadata[TRAINING_PAYLOAD_METADATA_KEY] = TrainingPayloadRef(
+        payload_key="payload",
+        trajectory_id="trajectory",
+        segment_id="segment",
+        token_count=2,
+        response_start=1,
+        response_length=1,
+        routed_experts_shape=[1, 4],
+        batch_id=7,
+    ).to_dict()
+
+    with pytest.raises(
+        ValueError,
+        match="MOPD does not support lazy TransferQueue payloads",
+    ):
+        cs.convert_samples_to_train_data(args, [sample])

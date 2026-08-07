@@ -46,6 +46,11 @@ from dressage.rollout.generate.runtime import (
     maybe_await,
     paddock_env_args_from_metadata,
 )
+from dressage.transport.client import prepare_trajectory
+from dressage.transport.payload import (
+    LAZY_TRAJECTORY_METADATA_KEY,
+    transfer_queue_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -104,8 +109,11 @@ async def generate(
     )
     paddock = None
     state = None
+    proxy_client = None
     initialized = False
     agent_response = ""
+    use_transfer_queue = transfer_queue_enabled()
+    lazy_handed_off = False
     try:
         execute_cmd_schedule = parse_blackbox_execute_cmds(
             metadata.get("blackbox_execute_cmds")
@@ -224,10 +232,19 @@ async def generate(
             session_id=session_id,
             stage="after_agent",
         )
-        await proxy_client.finalize_session(
+        finalization_result = await proxy_client.finalize_session(
             session_id, instance_id=instance_id, label=getattr(sample, "label", None)
         )
-        trajectory_payload = await proxy_client.read_trajectory(
+        has_transport = isinstance(finalization_result.get("transport"), dict)
+        if use_transfer_queue != has_transport:
+            if has_transport:
+                await proxy_client.discard_session(session_id)
+            raise RuntimeError(
+                "DRESSAGE_ENABLE_TRANSFER_QUEUE does not match the proxy"
+            )
+        trajectory_payload = await prepare_trajectory(
+            proxy_client,
+            finalization_result,
             trajectory_id=session_id,
             instance_id=instance_id,
             drain=True,
@@ -271,6 +288,10 @@ async def generate(
                 session_id,
                 exc_info=True,
             )
+        if use_transfer_queue:
+            for result_sample in result:
+                result_sample.metadata[LAZY_TRAJECTORY_METADATA_KEY] = session_id
+            lazy_handed_off = True
         return result
     except Exception as exc:
         expected_abort = expected_abort_from_call_agent_exception(exc)
@@ -315,3 +336,12 @@ async def generate(
                 session_id=session_id,
                 env_args=env_args,
             )
+        if use_transfer_queue and not lazy_handed_off and proxy_client is not None:
+            try:
+                await proxy_client.discard_session(session_id)
+            except Exception:
+                logger.warning(
+                    "failed to discard lazy trajectory session_id=%s",
+                    session_id,
+                    exc_info=True,
+                )
