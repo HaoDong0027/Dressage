@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from dressage.rollout.multi_segment import mark_aborted_no_grad
@@ -317,6 +318,24 @@ def test_aborted_no_grad_sample_passes_convert_samples():
     # Dead sample shares instance_id="p1" → same denom; harmless because
     # its loss_mask is zeroed so it contributes 0 to loss regardless.
     assert train_data["rollout_mask_sums"][1] == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("failed_first", [False, True])
+def test_convert_samples_fills_r3_for_failed_no_grad_sample(failed_first):
+    args = _prompt_equal_args(gbs=4)
+    args.use_rollout_routing_replay = True
+    args.num_layers = 2
+    args.moe_router_topk = 2
+    real = _real_seg(ptid="t1", instance_id="p1", mask=[1, 1], index=0, rollout_id=0)
+    real.rollout_routed_experts = np.ones((2, 2, 2), dtype=np.int32)
+    failed = _failed_seg(ptid="t2", instance_id="p2", index=1)
+    samples = [failed, real] if failed_first else [real, failed]
+
+    train_data = cs.convert_samples_to_train_data(args, samples)
+
+    failed_r3 = train_data["rollout_routed_experts"][0 if failed_first else 1]
+    assert failed_r3.shape == (0, 2, 2)
+    assert failed_r3.dtype == np.int32
 
 
 def test_convert_samples_registers_lazy_transfer_queue_batch(monkeypatch):
