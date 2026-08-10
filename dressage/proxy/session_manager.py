@@ -130,7 +130,6 @@ class StepRecord:
     concat_output_token_count: int = 0
     concat_logprobs_invalid: bool = False
     concat_incremental_tokenization_failed: bool = False
-    response_routed_experts: str | None = None
     response_routed_experts_chunks: list[dict[str, Any]] = field(default_factory=list)
     tools: list[dict[str, Any]] | None = None
     segment_boundary_before: bool = False
@@ -435,7 +434,6 @@ class SessionManager:
         concat_output_token_count: int = 0,
         concat_logprobs_invalid: bool = False,
         concat_incremental_tokenization_failed: bool = False,
-        response_routed_experts: str | None = None,
         response_routed_experts_chunks: list[dict[str, Any]] | None = None,
         tools: list[dict[str, Any]] | None = None,
         segment_boundary_before: bool = False,
@@ -518,7 +516,6 @@ class SessionManager:
                 concat_incremental_tokenization_failed=(
                     concat_incremental_tokenization_failed
                 ),
-                response_routed_experts=response_routed_experts,
                 response_routed_experts_chunks=[
                     dict(item) for item in (response_routed_experts_chunks or [])
                 ],

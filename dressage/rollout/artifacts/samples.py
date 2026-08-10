@@ -353,16 +353,6 @@ def write_sample_from_segment(
         expected_token_count=len(tokens),
     )
     if routed_experts is not None:
-        expected_len = len(tokens) - 1
-        if routed_experts.shape[0] > expected_len:
-            routed_experts = routed_experts[:expected_len]
-        if routed_experts.shape[0] != expected_len:
-            logger.warning(
-                "routed_experts length %d != expected %d; skipping R3",
-                routed_experts.shape[0], expected_len,
-            )
-            routed_experts = None
-    if routed_experts is not None:
         sample.rollout_routed_experts = routed_experts
     elif getattr(args, "use_rollout_routing_replay", False):
         raise ValueError(
@@ -396,61 +386,27 @@ def extract_routed_experts(
             dtype=np.int32,
         ).reshape(-1, num_layers, moe_router_topk)
 
-    def slice_generated(
-        full_array: Any,
-        prefix_count: int,
-        output_count: int,
-        is_first: bool,
-    ) -> Any:
-        if is_first:
-            return full_array[:prefix_count + output_count - 1]
-        start = prefix_count - 1
-        return full_array[start:start + output_count]
-
-    def combine_chunks(chunks_info: list[dict[str, Any]]) -> Any:
-        slices = [
-            slice_generated(
-                decode(chunk["data"]),
-                int(chunk["prefix_token_count"]),
-                int(chunk["output_token_count"]),
-                bool(chunk.get("is_first_chunk")),
-            )
-            for chunk in chunks_info
-        ]
-        return np.concatenate(slices, axis=0) if slices else None
-
-    def check_min_length(result: Any) -> Any:
-        if expected_token_count > 0 and result.shape[0] < expected_token_count - 1:
-            logger.warning(
-                "routed_experts too short: got %d, expected >= %d; skipping R3",
-                result.shape[0], expected_token_count - 1,
-            )
-            return None
-        return result
-
     chunks_info = segment.get("routed_experts_chunks")
-    if chunks_info:
-        return check_min_length(combine_chunks(chunks_info))
-
-    raw = segment.get("routed_experts")
-    if raw is not None and isinstance(raw, str):
-        return check_min_length(decode(raw))
-
-    parts_info = segment.get("routed_experts_parts")
-    if not parts_info:
+    if not chunks_info:
         return None
 
-    slices = []
-    for part in parts_info:
-        if part.get("chunks"):
-            step_array = combine_chunks(part["chunks"])
-        else:
-            step_array = decode(part["data"])
-        prefix_count = int(part["prefix_token_count"])
-        concat_count = int(part["concat_token_count"])
-        is_first = bool(part.get("is_first_step"))
-        slices.append(slice_generated(step_array, prefix_count, concat_count, is_first))
-
-    if not slices:
-        return None
-    return check_min_length(np.concatenate(slices, axis=0))
+    arrays = []
+    for chunk in chunks_info:
+        decoded = decode(chunk["data"])
+        row_count = int(chunk["row_count"])
+        if decoded.shape[0] != row_count:
+            raise ValueError(
+                "routed_experts chunk row count does not match its payload: "
+                f"expected={row_count}, actual={decoded.shape[0]}"
+            )
+        arrays.append(decoded)
+    result = np.concatenate(arrays, axis=0)
+    if expected_token_count > 0:
+        expected_rows = expected_token_count - 1
+        if result.shape[0] < expected_rows:
+            raise ValueError(
+                "routed_experts length does not match trajectory tokens: "
+                f"expected_at_least={expected_rows}, actual={result.shape[0]}"
+            )
+        result = result[:expected_rows]
+    return result

@@ -604,21 +604,17 @@ def test_parse_blackbox_execute_cmds_requires_explicit_bool_required():
         )
 
 
-def test_extract_routed_experts_combines_partial_last_step_chunks():
+def test_extract_routed_experts_combines_canonical_chunks():
     args = SimpleNamespace(num_layers=1, moe_router_topk=1)
     segment = {
         "routed_experts_chunks": [
             {
                 "data": _encode_routed_experts([10, 11, 12, 13]),
-                "prefix_token_count": 3,
-                "output_token_count": 2,
-                "is_first_chunk": True,
+                "row_count": 4,
             },
             {
-                "data": _encode_routed_experts([20, 21, 22, 23, 24, 25]),
-                "prefix_token_count": 5,
-                "output_token_count": 2,
-                "is_first_chunk": False,
+                "data": _encode_routed_experts([24, 25]),
+                "row_count": 2,
             },
         ],
     }
@@ -633,41 +629,17 @@ def test_extract_routed_experts_combines_partial_last_step_chunks():
     assert routed.reshape(-1).tolist() == [10, 11, 12, 13, 24, 25]
 
 
-def test_extract_routed_experts_combines_partial_tito_parts():
+def test_extract_routed_experts_combines_incremental_tito_chunks():
     args = SimpleNamespace(num_layers=1, moe_router_topk=1)
     segment = {
-        "routed_experts_parts": [
+        "routed_experts_chunks": [
             {
-                "prefix_token_count": 0,
-                "concat_token_count": 4,
-                "is_first_step": True,
-                "chunks": [
-                    {
-                        "data": _encode_routed_experts([1, 2]),
-                        "prefix_token_count": 2,
-                        "output_token_count": 1,
-                        "is_first_chunk": True,
-                    },
-                    {
-                        "data": _encode_routed_experts([90, 91, 3]),
-                        "prefix_token_count": 3,
-                        "output_token_count": 1,
-                        "is_first_chunk": False,
-                    },
-                ],
+                "data": _encode_routed_experts([1, 2, 3]),
+                "row_count": 3,
             },
             {
-                "prefix_token_count": 4,
-                "concat_token_count": 3,
-                "is_first_step": False,
-                "chunks": [
-                    {
-                        "data": _encode_routed_experts([10, 11, 12, 13, 14, 15]),
-                        "prefix_token_count": 6,
-                        "output_token_count": 1,
-                        "is_first_chunk": True,
-                    },
-                ],
+                "data": _encode_routed_experts([13, 14, 15]),
+                "row_count": 3,
             },
         ],
     }
@@ -680,6 +652,26 @@ def test_extract_routed_experts_combines_partial_tito_parts():
 
     assert routed.shape == (6, 1, 1)
     assert routed.reshape(-1).tolist() == [1, 2, 3, 13, 14, 15]
+
+
+def test_extract_routed_experts_truncates_canonical_chunks():
+    args = SimpleNamespace(num_layers=1, moe_router_topk=1)
+    segment = {
+        "routed_experts_chunks": [
+            {
+                "data": _encode_routed_experts([1, 2, 3, 4]),
+                "row_count": 4,
+            }
+        ],
+    }
+
+    routed = trajectory_sample.extract_routed_experts(
+        segment,
+        args,
+        expected_token_count=3,
+    )
+
+    assert routed.reshape(-1).tolist() == [1, 2]
 
 
 def _dynamic_backend_options(

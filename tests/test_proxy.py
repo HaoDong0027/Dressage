@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
 import re
 import threading
+from array import array
 from pathlib import Path
 from typing import Any
 
@@ -616,6 +618,38 @@ def make_response(
         input_token_logprobs_raw=prompt_logprobs,
         all_logprobs_invalid=all_logprobs_invalid,
     )
+
+
+def encode_routed_experts(values: list[int]) -> str:
+    encoded = array("i", values)
+    assert encoded.itemsize == 4
+    return base64.b64encode(encoded.tobytes()).decode("ascii")
+
+
+def decode_routed_expert_chunks(chunks: list[dict]) -> list[int]:
+    values: list[int] = []
+    for chunk in chunks:
+        decoded = array("i")
+        decoded.frombytes(base64.b64decode(chunk["data"]))
+        values.extend(decoded)
+    return values
+
+
+class RoutingSGLangClient(FakeSGLangClient):
+    async def generate(self, input_ids, sampling_params, **kwargs):
+        kwargs.pop("request_id", None)
+        response = await super().generate(
+            input_ids,
+            sampling_params,
+            **kwargs,
+        )
+        response_index = len(self.calls) - 1
+        row_count = len(response.all_token_ids) - 1
+        response.routed_experts = encode_routed_experts(
+            [response_index * 100_000 + index for index in range(row_count)]
+        )
+        response.meta_info["routed_experts"] = response.routed_experts
+        return response
 
 
 def make_prompt_logprob_missing_response(text: str) -> SGLangResponse:
@@ -4124,6 +4158,154 @@ def test_finalize_concat_mode_uses_tito_recorded_step_fragments():
     assert extra["num_steps"] == 2
     assert "mask_template_equivalent" not in extra
     assert "mask_fallback_reason" not in extra
+
+
+def test_tito_r3_is_incremental_for_create_append_branch_and_both_views():
+    sglang_client = RoutingSGLangClient(
+        [make_response("one"), make_response("two"), make_response("three")]
+    )
+    client, session_manager, _, _ = make_client(
+        sglang_client=sglang_client,
+        token_build_mode="tito",
+        tito_model="qwen3_5",
+        use_rollout_routing_replay=True,
+    )
+
+    def post(messages: list[dict]) -> None:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"X-Session-Id": "sess-r3", "X-Instance-Id": "inst-r3"},
+            json={"model": "fake-model", "messages": messages},
+        )
+        assert response.status_code == 200
+
+    post([{"role": "user", "content": "root"}])
+    after_first = list(session_manager.get_session("sess-r3").full_messages)
+    post(after_first + [{"role": "user", "content": "append"}])
+    post(after_first + [{"role": "user", "content": "branch"}])
+
+    session = session_manager.get_session("sess-r3")
+    assert [step.route_type for step in session.steps] == ["create", "append", "branch"]
+    first, second, third = session.steps
+    first_values = decode_routed_expert_chunks(first.response_routed_experts_chunks)
+    second_values = decode_routed_expert_chunks(second.response_routed_experts_chunks)
+    third_values = decode_routed_expert_chunks(third.response_routed_experts_chunks)
+    assert first_values == list(range(len(first.concat_token_ids) - 1))
+    second_start = len(first.concat_token_ids) - 1
+    assert second_values == list(
+        range(
+            100_000 + second_start,
+            100_000 + second_start + len(second.concat_token_ids),
+        )
+    )
+    assert third_values == list(
+        range(200_000, 200_000 + len(third.concat_token_ids) - 1)
+    )
+
+    finalized = client.post(
+        "/session/finalize",
+        json={"session_id": "sess-r3", "instance_id": "inst-r3"},
+    )
+    assert finalized.status_code == 200
+
+    lineage_items = client.post(
+        "/trajectory/read",
+        json={"trajectory_id": "sess-r3", "segment_view": "lineage"},
+    ).json()["data"]
+    timeline_items = client.post(
+        "/trajectory/read",
+        json={"trajectory_id": "sess-r3", "segment_view": "timeline"},
+    ).json()["data"]
+    assert len(lineage_items) == 2
+    assert len(timeline_items) == 3
+    for item in [*lineage_items, *timeline_items]:
+        assert "routed_experts" not in item
+        assert "routed_experts_parts" not in item
+        chunks = item["routed_experts_chunks"]
+        assert sum(chunk["row_count"] for chunk in chunks) == len(item["tokens"]) - 1
+        assert len(decode_routed_expert_chunks(chunks)) == len(item["tokens"]) - 1
+
+
+def test_snapshot_r3_is_canonicalized_before_step_storage():
+    sglang_client = RoutingSGLangClient([make_response("answer")])
+    client, session_manager, _, _ = make_client(
+        sglang_client=sglang_client,
+        use_rollout_routing_replay=True,
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"X-Session-Id": "sess-snapshot-r3", "X-Instance-Id": "inst"},
+        json={"model": "fake-model", "messages": [{"role": "user", "content": "q"}]},
+    )
+    assert response.status_code == 200
+    step = session_manager.get_session("sess-snapshot-r3").latest_step
+    assert sum(
+        chunk["row_count"] for chunk in step.response_routed_experts_chunks
+    ) == len(step.all_token_ids) - 1
+
+    finalized = client.post(
+        "/session/finalize",
+        json={"session_id": "sess-snapshot-r3", "instance_id": "inst"},
+    )
+    assert finalized.status_code == 200
+    item = client.post(
+        "/trajectory/read",
+        json={"trajectory_id": "sess-snapshot-r3"},
+    ).json()["data"][0]
+    assert sum(
+        chunk["row_count"] for chunk in item["routed_experts_chunks"]
+    ) == len(item["tokens"]) - 1
+
+
+def test_tito_r3_restarts_at_lineage_segment_boundary():
+    sglang_client = RoutingSGLangClient(
+        [make_response("one"), make_response("two")]
+    )
+    client, session_manager, _, _ = make_client(
+        sglang_client=sglang_client,
+        token_build_mode="tito",
+        tito_model="qwen3_5",
+        use_rollout_routing_replay=True,
+    )
+
+    first = client.post(
+        "/v1/chat/completions",
+        headers={"X-Session-Id": "sess-boundary-r3", "X-Instance-Id": "inst"},
+        json={"model": "fake-model", "messages": [{"role": "user", "content": "q"}]},
+    )
+    assert first.status_code == 200
+    messages = list(session_manager.get_session("sess-boundary-r3").full_messages)
+    second = client.post(
+        "/v1/chat/completions",
+        headers={"X-Session-Id": "sess-boundary-r3", "X-Instance-Id": "inst"},
+        json={
+            "model": "fake-model",
+            "messages": messages + [{"role": "user", "content": "next"}],
+            "tools": make_tools("search"),
+        },
+    )
+    assert second.status_code == 200
+
+    steps = session_manager.get_session("sess-boundary-r3").steps
+    assert steps[1].lineage_segment_boundary_before is True
+    assert sum(
+        chunk["row_count"] for chunk in steps[1].response_routed_experts_chunks
+    ) == len(steps[1].concat_token_ids) - 1
+
+    finalized = client.post(
+        "/session/finalize",
+        json={"session_id": "sess-boundary-r3", "instance_id": "inst"},
+    )
+    assert finalized.status_code == 200
+    lineage_items = client.post(
+        "/trajectory/read",
+        json={"trajectory_id": "sess-boundary-r3", "segment_view": "lineage"},
+    ).json()["data"]
+    assert len(lineage_items) == 2
+    assert sum(
+        chunk["row_count"] for chunk in lineage_items[1]["routed_experts_chunks"]
+    ) == len(lineage_items[1]["tokens"]) - 1
 
 
 def test_concat_append_only_prompt_uses_online_tito_without_full_tokenize():

@@ -20,6 +20,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
+import numpy as np
+
 _PROMPT_EQUAL_ESTIMATORS = ("grpo", "reinforce_plus_plus_baseline")
 
 
@@ -181,7 +183,22 @@ def convert_samples_to_train_data(args: Any, samples: list) -> dict:
             sample.rollout_log_probs for sample in samples
         ]
 
-    if samples[0].rollout_routed_experts is not None:
+    if getattr(args, "use_rollout_routing_replay", False):
+        routed_experts = []
+        for sample in samples:
+            value = sample.rollout_routed_experts
+            if value is None and sample.remove_sample:
+                value = np.zeros(
+                    (
+                        len(sample.tokens) - 1,
+                        args.num_layers,
+                        args.moe_router_topk,
+                    ),
+                    dtype=np.int32,
+                )
+            routed_experts.append(value)
+        train_data["rollout_routed_experts"] = routed_experts
+    elif samples[0].rollout_routed_experts is not None:
         train_data["rollout_routed_experts"] = [
             sample.rollout_routed_experts for sample in samples
         ]

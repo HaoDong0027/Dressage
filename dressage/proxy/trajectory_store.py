@@ -27,9 +27,7 @@ class TrajectorySegment:
     full_loss_mask: list[int]
     aligned_response_length: int
     full_versions: list[str] | None = None
-    routed_experts: str | None = None
     routed_experts_chunks: list[dict[str, Any]] | None = None
-    routed_experts_parts: list[dict[str, Any]] | None = None
     label: Any | None = None
     finish_reason: str = "stop"
     timestamp: float = field(default_factory=time.time)
@@ -61,12 +59,8 @@ class TrajectorySegment:
         }
         if self.full_versions is not None:
             data["full_versions"] = self.full_versions
-        if self.routed_experts is not None:
-            data["routed_experts"] = self.routed_experts
         if self.routed_experts_chunks is not None:
             data["routed_experts_chunks"] = self.routed_experts_chunks
-        if self.routed_experts_parts is not None:
-            data["routed_experts_parts"] = self.routed_experts_parts
         return data
 
 
@@ -160,9 +154,7 @@ class TrajectoryStore:
                 if data.get("full_versions") is None
                 else [str(value) for value in data["full_versions"]]
             ),
-            routed_experts=data.get("routed_experts"),
             routed_experts_chunks=data.get("routed_experts_chunks"),
-            routed_experts_parts=data.get("routed_experts_parts"),
             label=data.get("label"),
             finish_reason=data.get("finish_reason", "stop"),
             extra_info=data.get("extra_info", {}),

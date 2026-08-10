@@ -40,6 +40,7 @@ from .last_step import (
     create_default_mask_template_registry,
 )
 from .reasoning_parser import ProxyReasoningParser, canonicalize_reasoning_content
+from .routed_experts import canonicalize_routed_experts
 from .session_manager import Route, Session, SessionFinalizedError, SessionManager, StepRecord
 from .sglang_client import SGLangRouterClient
 from .tool_call_parser import (
@@ -963,8 +964,6 @@ def create_app(
             record["full_versions"] = full_versions
         if base_step.response_routed_experts_chunks:
             record["routed_experts_chunks"] = base_step.response_routed_experts_chunks
-        if base_step.response_routed_experts is not None:
-            record["routed_experts"] = base_step.response_routed_experts
         return record
 
     def _build_step_snapshot_record(
@@ -1045,10 +1044,27 @@ def create_app(
         }
         if full_versions is not None:
             record["full_versions"] = full_versions
-        if step.response_routed_experts_chunks:
-            record["routed_experts_chunks"] = step.response_routed_experts_chunks
-        if step.response_routed_experts is not None:
-            record["routed_experts"] = step.response_routed_experts
+        routed_experts_chunks = list(step.response_routed_experts_chunks)
+        if token_build_mode_for_record == "tito":
+            lineage_steps = [
+                item for item in session.steps if item.lineage_id == step.lineage_id
+            ]
+            target_index = next(
+                index
+                for index, item in enumerate(lineage_steps)
+                if item.step_id == step.step_id
+            )
+            start_index = 0
+            for index, item in enumerate(lineage_steps[: target_index + 1]):
+                if item.lineage_segment_boundary_before:
+                    start_index = index
+            routed_experts_chunks = [
+                dict(chunk)
+                for item in lineage_steps[start_index : target_index + 1]
+                for chunk in item.response_routed_experts_chunks
+            ]
+        if routed_experts_chunks:
+            record["routed_experts_chunks"] = routed_experts_chunks
         return record
 
     def _normalize_logprobs_to_length(
@@ -1173,23 +1189,13 @@ def create_app(
         if record_token_versions:
             record["full_versions"] = full_versions
 
-        routed_experts_parts: list[dict[str, Any]] = []
-        accumulated_prefix_len = 0
-        for step_index, step in enumerate(steps):
-            if step.response_routed_experts_chunks or step.response_routed_experts is not None:
-                part = {
-                    "prefix_token_count": accumulated_prefix_len,
-                    "concat_token_count": len(step.concat_token_ids),
-                    "is_first_step": step_index == 0,
-                }
-                if step.response_routed_experts_chunks:
-                    part["chunks"] = step.response_routed_experts_chunks
-                if step.response_routed_experts is not None:
-                    part["data"] = step.response_routed_experts
-                routed_experts_parts.append(part)
-            accumulated_prefix_len += len(step.concat_token_ids)
-        if routed_experts_parts:
-            record["routed_experts_parts"] = routed_experts_parts
+        routed_experts_chunks = [
+            dict(chunk)
+            for step in steps
+            for chunk in step.response_routed_experts_chunks
+        ]
+        if routed_experts_chunks:
+            record["routed_experts_chunks"] = routed_experts_chunks
 
         return record
 
@@ -1927,6 +1933,38 @@ def create_app(
                     template_kwargs=tito_template_kwargs,
                 )
 
+            if token_build_mode == "tito":
+                previous_prefix_count = (
+                    0
+                    if route.type in {"create", "branch"}
+                    or lineage_segment_boundary_before
+                    else len(
+                        _lineage_tito_prefix_token_ids(
+                            session,
+                            route.lineage_id,
+                        )
+                    )
+                )
+                concat_token_count = len(concat_payload["concat_token_ids"])
+                if previous_prefix_count == 0:
+                    routed_experts_target_start = 0
+                    routed_experts_target_count = max(0, concat_token_count - 1)
+                else:
+                    routed_experts_target_start = previous_prefix_count - 1
+                    routed_experts_target_count = concat_token_count
+            else:
+                routed_experts_target_start = 0
+                routed_experts_target_count = max(
+                    0,
+                    len(recorded_all_token_ids) - 1,
+                )
+            response_routed_experts_chunks = canonicalize_routed_experts(
+                router_response.routed_experts_chunks,
+                target_start=routed_experts_target_start,
+                target_count=routed_experts_target_count,
+            )
+            router_response.routed_experts_chunks.clear()
+
             session_manager.record_step(
                 session_id=session_id,
                 turn_id=effective_turn_id,
@@ -1948,8 +1986,7 @@ def create_app(
                 raw_response_text=recorded_raw_text,
                 all_logprobs_invalid=router_response.all_logprobs_invalid,
                 **concat_payload,
-                response_routed_experts=router_response.routed_experts,
-                response_routed_experts_chunks=router_response.routed_experts_chunks,
+                response_routed_experts_chunks=response_routed_experts_chunks,
                 tools=tools,
                 segment_boundary_before=segment_boundary_before,
                 rewrite_reason=rewrite_reason,
