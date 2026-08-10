@@ -2118,6 +2118,23 @@ def create_app(
             headers=_SSE_RESPONSE_HEADERS,
         )
 
+    @app.post("/session/discard")
+    async def discard_session(request: Request):
+        """Idempotently remove proxy state for a rejected rollout attempt."""
+
+        _check_auth(request)
+        body = await request.json()
+        session_id = str(body["session_id"])
+
+        session_removed = session_manager.discard_session(session_id)
+        removed_segments = trajectory_store.pop_trajectory(session_id)
+        return {
+            "success": True,
+            "session_id": session_id,
+            "session_removed": session_removed,
+            "segments_removed": len(removed_segments),
+        }
+
     @app.post("/session/finalize")
     async def finalize_session(request: Request):
         _check_auth(request)

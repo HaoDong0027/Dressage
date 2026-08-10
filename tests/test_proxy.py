@@ -1245,6 +1245,71 @@ def test_finalize_is_idempotent_and_marks_complete_segment_set():
     )
 
 
+def test_discard_session_removes_finalized_cache_and_trajectory_idempotently():
+    client, session_manager, trajectory_store, _ = make_client(make_response("done"))
+    generated = client.post(
+        "/v1/chat/completions",
+        headers={
+            "X-Session-Id": "discard-me",
+            "X-Instance-Id": "instance-discard",
+        },
+        json={
+            "model": "fake-model",
+            "messages": [{"role": "user", "content": "go"}],
+        },
+    )
+    assert generated.status_code == 200
+
+    finalized = client.post(
+        "/session/finalize",
+        json={"session_id": "discard-me", "instance_id": "instance-discard"},
+    )
+    assert finalized.status_code == 200
+    assert session_manager.get_finalization_result("discard-me") is not None
+    assert trajectory_store.stats()["total_items"] == 1
+
+    first = client.post("/session/discard", json={"session_id": "discard-me"})
+    second = client.post("/session/discard", json={"session_id": "discard-me"})
+
+    assert first.status_code == 200
+    assert first.json()["session_removed"] is True
+    assert first.json()["segments_removed"] == 1
+    assert second.status_code == 200
+    assert second.json()["session_removed"] is False
+    assert second.json()["segments_removed"] == 0
+    assert session_manager.get_session("discard-me") is None
+    assert session_manager.get_finalization_result("discard-me") is None
+    assert trajectory_store.stats()["total_items"] == 0
+
+
+def test_discard_session_removes_unfinalized_active_session():
+    client, session_manager, trajectory_store, _ = make_client(make_response("done"))
+    generated = client.post(
+        "/v1/chat/completions",
+        headers={
+            "X-Session-Id": "discard-active",
+            "X-Instance-Id": "instance-active",
+        },
+        json={
+            "model": "fake-model",
+            "messages": [{"role": "user", "content": "go"}],
+        },
+    )
+    assert generated.status_code == 200
+    assert session_manager.get_session("discard-active") is not None
+
+    response = client.post(
+        "/session/discard",
+        json={"session_id": "discard-active"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["session_removed"] is True
+    assert response.json()["segments_removed"] == 0
+    assert session_manager.get_session("discard-active") is None
+    assert trajectory_store.stats()["total_items"] == 0
+
+
 def test_finalize_write_failure_preserves_active_session_and_empty_store():
     class FailingTrajectoryStore(TrajectoryStore):
         def write_many(self, records):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 import os
@@ -48,6 +49,41 @@ def get_proxy_client() -> ProxyClientType:
 
         _PROXY_CLIENT = ProxyClient(proxy_url())
     return _PROXY_CLIENT
+
+
+async def discard_proxy_session_best_effort(
+    session_id: str | None,
+    *,
+    proxy_client: ProxyClientType | None = None,
+) -> bool:
+    """Discard one rejected attempt without turning cleanup into rollout failure."""
+
+    if not session_id:
+        return True
+
+    try:
+        client = proxy_client or get_proxy_client()
+        result = await asyncio.wait_for(
+            client.discard_session(str(session_id)),
+            timeout=10.0,
+        )
+        if isinstance(result, dict) and result.get("success") is False:
+            logger.warning(
+                "proxy refused to discard failed rollout session_id=%s: %r",
+                session_id,
+                result,
+            )
+            return False
+    except Exception:
+        logger.warning(
+            "failed to discard proxy state for aborted rollout session_id=%s",
+            session_id,
+            exc_info=True,
+        )
+        return False
+
+    logger.debug("discarded proxy state for aborted rollout session_id=%s", session_id)
+    return True
 
 
 def get_paddock_from_env(

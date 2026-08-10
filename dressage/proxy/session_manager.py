@@ -579,6 +579,25 @@ class SessionManager:
                     self._finalization_results[session_id] = copy.deepcopy(result)
             return session
 
+    def discard_session(self, session_id: str) -> bool:
+        """Forget active and finalized state for an abandoned trajectory.
+
+        Rollout retries always use a fresh session id, so a rejected attempt no
+        longer needs either its active conversation or its idempotent-finalize
+        cache.  The operation is intentionally idempotent for best-effort
+        cleanup callers.
+        """
+
+        with self._lock:
+            active = self._sessions.pop(session_id, None)
+            finalized_at = self._finalized_session_ids.pop(session_id, None)
+            finalization_result = self._finalization_results.pop(session_id, None)
+            return (
+                active is not None
+                or finalized_at is not None
+                or finalization_result is not None
+            )
+
     def active_count(self) -> int:
         with self._lock:
             self._cleanup_expired_locked()

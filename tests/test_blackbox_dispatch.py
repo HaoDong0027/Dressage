@@ -445,6 +445,10 @@ class FakeProxy:
             ],
         }
 
+    async def discard_session(self, session_id):
+        self.calls.append(("discard", session_id))
+        return {"success": True, "session_id": session_id}
+
 
 def _rollout_args(
     *,
@@ -1033,6 +1037,11 @@ async def _run_blackbox_dispatch_required_execute_cmd_failure_aborts(monkeypatch
     assert sample.metadata["execute_cmds"][0]["cmd_result"]["returncode"] == 2
     assert "required execute_cmd failed" in sample.metadata["blackbox_error"]
     assert not [call for call in paddock.calls if call[0] == "call_agent"]
+    assert [
+        call
+        for call in generate_runtime._PROXY_CLIENT.calls
+        if call[0] == "discard"
+    ] == [("discard", sample.metadata["last_failed_session_id"])]
 
 
 def test_blackbox_dispatch_optional_execute_cmd_failure_continues(monkeypatch):
@@ -1257,7 +1266,7 @@ async def _run_blackbox_dispatch_backend_timeout_still_aborts(monkeypatch):
         "call_agent",
         "terminate",
     ]
-    assert proxy.calls == []
+    assert proxy.calls == [("discard", "bbs-sess-7")]
 
 
 def test_blackbox_dispatch_optional_execute_cmd_http_failure_continues(monkeypatch):
@@ -1446,6 +1455,7 @@ async def _run_blackbox_dispatch_retry_uses_new_session_id_after_abort(monkeypat
         for call in paddock.calls
     )
     assert proxy.calls == [
+        ("discard", first_session_id),
         ("finalize", retry_session_id, "7", None),
         (
             "read",
