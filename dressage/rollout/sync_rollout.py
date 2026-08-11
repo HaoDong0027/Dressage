@@ -24,7 +24,7 @@ from dressage.rollout.fully_async_rollout import (
     _mark_no_grad_failed,
     _retry_count,
 )
-from dressage.rollout.generate.runtime import discard_group_sessions_best_effort
+from dressage.rollout.generate.runtime import generate_group
 
 logger = logging.getLogger(__name__)
 
@@ -60,11 +60,11 @@ async def _submit_group(
     if generate_and_rm_group is None:
         raise RuntimeError("slime.rollout.sglang_rollout.generate_and_rm_group is unavailable")
     task = asyncio.create_task(
-        generate_and_rm_group(
+        generate_group(
+            generate_and_rm_group,
             args,
             group,
             sampling_params=state.sampling_params.copy(),
-            evaluation=False,
         )
     )
     pendings.add(task)
@@ -117,7 +117,6 @@ async def _run_sync_rollout(
                 data.append(result_group)
                 continue
 
-            await discard_group_sessions_best_effort(result_group, group_for_task)
             summary = _group_failure_summary(
                 result_group if result_group is not None else group_for_task, error
             )

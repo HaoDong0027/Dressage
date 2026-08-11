@@ -51,43 +51,51 @@ def get_proxy_client() -> ProxyClientType:
     return _PROXY_CLIENT
 
 
-async def discard_group_sessions_best_effort(
-    generated_group: list[Any] | None,
-    original_group: list[Any] | None,
-) -> None:
-    session_ids: set[str] = set()
-    for sample in [*(generated_group or []), *(original_group or [])]:
-        metadata = getattr(sample, "metadata", None)
-        if not isinstance(metadata, dict):
-            metadata = {}
-        for session_id in (
-            getattr(sample, "session_id", None),
-            metadata.get("session_id"),
-            metadata.get("last_failed_session_id"),
-            metadata.get("parent_traj_id"),
+async def generate_group(
+    generate: Any,
+    args: Any,
+    group: list[Any],
+    sampling_params: dict[str, Any],
+) -> list[Any]:
+    result = None
+    try:
+        result = await generate(
+            args,
+            group,
+            sampling_params=sampling_params,
+            evaluation=False,
+        )
+        return result
+    finally:
+        generated = [
+            sample
+            for item in (result or [])
+            for sample in (item if isinstance(item, list) else [item])
+        ]
+        if result is None or any(
+            sample.status.name == "ABORTED" for sample in generated
         ):
-            if session_id:
-                session_ids.add(str(session_id))
-
-    if not session_ids:
-        return
-
-    client = get_proxy_client()
-    ordered_session_ids = sorted(session_ids)
-    results = await asyncio.gather(
-        *(
-            asyncio.wait_for(client.discard_session(session_id), timeout=10.0)
-            for session_id in ordered_session_ids
-        ),
-        return_exceptions=True,
-    )
-    for session_id, result in zip(ordered_session_ids, results):
-        if isinstance(result, BaseException):
-            logger.warning(
-                "failed to discard proxy state for session_id=%s: %r",
-                session_id,
-                result,
-            )
+            session_ids = set()
+            for sample in [*generated, *group]:
+                session_id = (
+                    sample.session_id
+                    or sample.metadata.get("session_id")
+                    or sample.metadata.get("last_failed_session_id")
+                    or sample.metadata.get("parent_traj_id")
+                )
+                if session_id:
+                    session_ids.add(str(session_id))
+            if session_ids:
+                client = get_proxy_client()
+                await asyncio.gather(
+                    *(
+                        asyncio.wait_for(
+                            client.discard_session(session_id), timeout=10.0
+                        )
+                        for session_id in session_ids
+                    ),
+                    return_exceptions=True,
+                )
 
 
 def get_paddock_from_env(

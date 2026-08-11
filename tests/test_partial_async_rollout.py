@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from dressage.rollout import partial_async_rollout
+from dressage.rollout.generate import runtime as generate_runtime
 
 
 @dataclass
@@ -60,20 +61,11 @@ def teardown_function():
 def group_cleanup_calls(monkeypatch):
     calls = []
 
-    async def discard(generated_group, original_group):
-        del generated_group
-        calls.append(
-            [
-                int((sample.metadata or {}).get("dressage_retry_count", 0))
-                for sample in original_group
-            ]
-        )
+    class FakeProxy:
+        async def discard_session(self, session_id):
+            calls.append(session_id)
 
-    monkeypatch.setattr(
-        partial_async_rollout,
-        "discard_group_sessions_best_effort",
-        discard,
-    )
+    monkeypatch.setattr(generate_runtime, "_PROXY_CLIENT", FakeProxy())
     return calls
 
 
@@ -177,6 +169,7 @@ def test_partial_async_rollout_retries_aborted_group(monkeypatch, group_cleanup_
         if attempts["count"] == 1:
             group[0].status = SampleLike.Status.ABORTED
             group[0].metadata["blackbox_error"] = "duplicate session"
+            group[0].metadata["last_failed_session_id"] = "old-session"
             group[0].session_id = None
         else:
             group[0].status = SampleLike.Status.COMPLETED
@@ -199,7 +192,7 @@ def test_partial_async_rollout_retries_aborted_group(monkeypatch, group_cleanup_
 
     assert attempts["count"] == 2
     assert len(data.requeued) == 1
-    assert group_cleanup_calls == [[0]]
+    assert group_cleanup_calls == ["old-session"]
     assert result[0][0].status == SampleLike.Status.COMPLETED
     assert result[0][0].session_id == "new-session"
 

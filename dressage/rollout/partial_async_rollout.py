@@ -42,7 +42,7 @@ from dressage.rollout.fully_async_rollout import (
     _retry_count,
 )
 from dressage.paddock.lifecycle import drain_lifecycle_tasks
-from dressage.rollout.generate.runtime import discard_group_sessions_best_effort
+from dressage.rollout.generate.runtime import generate_group
 from dressage.rollout.staleness import (
     PendingGroup,
     StalenessGroupFilter,
@@ -343,11 +343,11 @@ class PartialAsyncRolloutWorker:
     async def _run_group(self, group: list[Any], sampling_params: dict[str, Any]) -> list[Any]:
         if generate_and_rm_group is None:
             raise RuntimeError("slime.rollout.sglang_rollout.generate_and_rm_group is unavailable")
-        return await generate_and_rm_group(
+        return await generate_group(
+            generate_and_rm_group,
             self.args,
             group,
             sampling_params=sampling_params,
-            evaluation=False,
         )
 
     def _put_completed(self, item: CompletedGroup) -> None:
@@ -485,10 +485,6 @@ async def generate_rollout_partial_async_impl(
                 break
             completed = completed_by_id.pop(group_id)
             if completed.is_failed:
-                await discard_group_sessions_best_effort(
-                    completed.result,
-                    completed.original_group,
-                )
                 failed_group = completed.result or completed.original_group
                 staleness_failure = _group_has_staleness_failure(
                     failed_group,

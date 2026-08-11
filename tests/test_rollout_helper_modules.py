@@ -279,17 +279,21 @@ def test_generate_runtime_discards_all_group_sessions_once(monkeypatch):
     proxy = FakeProxy()
     monkeypatch.setattr(generate_runtime, "_PROXY_CLIENT", proxy)
     generated_group = [
-        SimpleNamespace(
-            session_id=None,
-            metadata={
-                "last_failed_session_id": "failed-session",
-                "parent_traj_id": "failed-session",
-            },
-        ),
-        SimpleNamespace(
-            session_id="completed-session",
-            metadata={"parent_traj_id": "completed-session"},
-        ),
+        [
+            SimpleNamespace(
+                session_id=None,
+                status=SimpleNamespace(name="ABORTED"),
+                metadata={
+                    "last_failed_session_id": "failed-session",
+                    "parent_traj_id": "failed-session",
+                },
+            ),
+            SimpleNamespace(
+                session_id="completed-session",
+                status=SimpleNamespace(name="COMPLETED"),
+                metadata={"parent_traj_id": "completed-session"},
+            ),
+        ]
     ]
     original_group = [
         SimpleNamespace(
@@ -298,14 +302,50 @@ def test_generate_runtime_discards_all_group_sessions_once(monkeypatch):
         )
     ]
 
-    asyncio.run(
-        generate_runtime.discard_group_sessions_best_effort(
-            generated_group,
+    async def generate(args, group, sampling_params, evaluation=False):
+        del args, group, sampling_params, evaluation
+        return generated_group
+
+    result = asyncio.run(
+        generate_runtime.generate_group(
+            generate,
+            SimpleNamespace(),
             original_group,
+            {},
         )
     )
 
-    assert proxy.session_ids == ["completed-session", "failed-session"]
+    assert result is generated_group
+    assert set(proxy.session_ids) == {"completed-session", "failed-session"}
+
+
+def test_generate_runtime_discards_group_when_generation_raises(monkeypatch):
+    class FakeProxy:
+        def __init__(self):
+            self.session_ids = []
+
+        async def discard_session(self, session_id):
+            self.session_ids.append(session_id)
+
+    async def generate(args, group, sampling_params, evaluation=False):
+        del args, sampling_params, evaluation
+        group[0].session_id = "started-session"
+        raise RuntimeError("generation failed")
+
+    proxy = FakeProxy()
+    monkeypatch.setattr(generate_runtime, "_PROXY_CLIENT", proxy)
+
+    with pytest.raises(RuntimeError, match="generation failed"):
+        asyncio.run(
+            generate_runtime.generate_group(
+                generate,
+                SimpleNamespace(),
+                [SimpleNamespace(session_id=None, metadata={})],
+                {},
+            )
+        )
+
+    assert proxy.session_ids == ["started-session"]
 
 
 def test_generate_runtime_get_paddock_from_env_mode_rules(monkeypatch):
