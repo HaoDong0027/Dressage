@@ -50,6 +50,27 @@ def teardown_function():
     fully_async_rollout.stop_global_worker()
 
 
+@pytest.fixture(autouse=True)
+def group_cleanup_calls(monkeypatch):
+    calls = []
+
+    async def discard(generated_group, original_group):
+        del generated_group
+        calls.append(
+            [
+                int((sample.metadata or {}).get("dressage_retry_count", 0))
+                for sample in original_group
+            ]
+        )
+
+    monkeypatch.setattr(
+        fully_async_rollout,
+        "discard_group_sessions_best_effort",
+        discard,
+    )
+    return calls
+
+
 def test_increment_retry_resets_session_ids_for_whole_group():
     group = [
         SampleLike(
@@ -136,7 +157,7 @@ def test_fully_async_rollout_stops_worker_after_final_rollout(monkeypatch):
     assert fully_async_rollout._GLOBAL_WORKER is None
 
 
-def test_fully_async_rollout_retries_aborted_group(monkeypatch):
+def test_fully_async_rollout_retries_aborted_group(monkeypatch, group_cleanup_calls):
     attempts = {"count": 0}
 
     async def fake_generate_and_rm_group(args, group, sampling_params, evaluation=False):
@@ -170,6 +191,7 @@ def test_fully_async_rollout_retries_aborted_group(monkeypatch):
 
     assert attempts["count"] == 2
     assert len(data.requeued) == 1
+    assert group_cleanup_calls == [[0]]
     assert result[0][0].status == SampleLike.Status.COMPLETED
     assert result[0][0].session_id == "new-session"
 

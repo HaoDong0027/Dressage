@@ -24,6 +24,7 @@ from dressage.rollout.fully_async_rollout import (
     _mark_no_grad_failed,
     _retry_count,
 )
+from dressage.rollout.generate.runtime import discard_group_sessions_best_effort
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,7 @@ async def _run_sync_rollout(
                 data.append(result_group)
                 continue
 
+            await discard_group_sessions_best_effort(result_group, group_for_task)
             summary = _group_failure_summary(
                 result_group if result_group is not None else group_for_task, error
             )

@@ -42,6 +42,7 @@ from dressage.rollout.fully_async_rollout import (
     _retry_count,
 )
 from dressage.paddock.lifecycle import drain_lifecycle_tasks
+from dressage.rollout.generate.runtime import discard_group_sessions_best_effort
 from dressage.rollout.staleness import (
     PendingGroup,
     StalenessGroupFilter,
@@ -484,6 +485,10 @@ async def generate_rollout_partial_async_impl(
                 break
             completed = completed_by_id.pop(group_id)
             if completed.is_failed:
+                await discard_group_sessions_best_effort(
+                    completed.result,
+                    completed.original_group,
+                )
                 failed_group = completed.result or completed.original_group
                 staleness_failure = _group_has_staleness_failure(
                     failed_group,

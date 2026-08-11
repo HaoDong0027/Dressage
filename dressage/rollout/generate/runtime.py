@@ -51,39 +51,43 @@ def get_proxy_client() -> ProxyClientType:
     return _PROXY_CLIENT
 
 
-async def discard_proxy_session_best_effort(
-    session_id: str | None,
-    *,
-    proxy_client: ProxyClientType | None = None,
-) -> bool:
-    """Discard one rejected attempt without turning cleanup into rollout failure."""
+async def discard_group_sessions_best_effort(
+    generated_group: list[Any] | None,
+    original_group: list[Any] | None,
+) -> None:
+    session_ids: set[str] = set()
+    for sample in [*(generated_group or []), *(original_group or [])]:
+        metadata = getattr(sample, "metadata", None)
+        if not isinstance(metadata, dict):
+            metadata = {}
+        for session_id in (
+            getattr(sample, "session_id", None),
+            metadata.get("session_id"),
+            metadata.get("last_failed_session_id"),
+            metadata.get("parent_traj_id"),
+        ):
+            if session_id:
+                session_ids.add(str(session_id))
 
-    if not session_id:
-        return True
+    if not session_ids:
+        return
 
-    try:
-        client = proxy_client or get_proxy_client()
-        result = await asyncio.wait_for(
-            client.discard_session(str(session_id)),
-            timeout=10.0,
-        )
-        if isinstance(result, dict) and result.get("success") is False:
+    client = get_proxy_client()
+    ordered_session_ids = sorted(session_ids)
+    results = await asyncio.gather(
+        *(
+            asyncio.wait_for(client.discard_session(session_id), timeout=10.0)
+            for session_id in ordered_session_ids
+        ),
+        return_exceptions=True,
+    )
+    for session_id, result in zip(ordered_session_ids, results):
+        if isinstance(result, BaseException):
             logger.warning(
-                "proxy refused to discard failed rollout session_id=%s: %r",
+                "failed to discard proxy state for session_id=%s: %r",
                 session_id,
                 result,
             )
-            return False
-    except Exception:
-        logger.warning(
-            "failed to discard proxy state for aborted rollout session_id=%s",
-            session_id,
-            exc_info=True,
-        )
-        return False
-
-    logger.debug("discarded proxy state for aborted rollout session_id=%s", session_id)
-    return True
 
 
 def get_paddock_from_env(

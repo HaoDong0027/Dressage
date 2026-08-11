@@ -267,6 +267,47 @@ def test_generate_runtime_get_proxy_client_uses_proxy_url(monkeypatch):
     assert first.url == "http://proxy.test:8800"
 
 
+def test_generate_runtime_discards_all_group_sessions_once(monkeypatch):
+    class FakeProxy:
+        def __init__(self):
+            self.session_ids = []
+
+        async def discard_session(self, session_id):
+            self.session_ids.append(session_id)
+            return {"success": True}
+
+    proxy = FakeProxy()
+    monkeypatch.setattr(generate_runtime, "_PROXY_CLIENT", proxy)
+    generated_group = [
+        SimpleNamespace(
+            session_id=None,
+            metadata={
+                "last_failed_session_id": "failed-session",
+                "parent_traj_id": "failed-session",
+            },
+        ),
+        SimpleNamespace(
+            session_id="completed-session",
+            metadata={"parent_traj_id": "completed-session"},
+        ),
+    ]
+    original_group = [
+        SimpleNamespace(
+            session_id="failed-session",
+            metadata={"session_id": "failed-session"},
+        )
+    ]
+
+    asyncio.run(
+        generate_runtime.discard_group_sessions_best_effort(
+            generated_group,
+            original_group,
+        )
+    )
+
+    assert proxy.session_ids == ["completed-session", "failed-session"]
+
+
 def test_generate_runtime_get_paddock_from_env_mode_rules(monkeypatch):
     import dressage.paddock.factory as paddock_factory
 

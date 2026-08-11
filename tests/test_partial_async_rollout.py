@@ -56,6 +56,27 @@ def teardown_function():
     partial_async_rollout.stop_global_partial_worker()
 
 
+@pytest.fixture(autouse=True)
+def group_cleanup_calls(monkeypatch):
+    calls = []
+
+    async def discard(generated_group, original_group):
+        del generated_group
+        calls.append(
+            [
+                int((sample.metadata or {}).get("dressage_retry_count", 0))
+                for sample in original_group
+            ]
+        )
+
+    monkeypatch.setattr(
+        partial_async_rollout,
+        "discard_group_sessions_best_effort",
+        discard,
+    )
+    return calls
+
+
 def test_partial_async_rollout_returns_global_batch_sized_subset(monkeypatch):
     async def fake_generate_and_rm_group(args, group, sampling_params, evaluation=False):
         del args, sampling_params, evaluation
@@ -147,7 +168,7 @@ def test_partial_async_rollout_does_not_drop_completed_leftovers(monkeypatch):
     assert [group[0].index for group in second] == [2, 3]
 
 
-def test_partial_async_rollout_retries_aborted_group(monkeypatch):
+def test_partial_async_rollout_retries_aborted_group(monkeypatch, group_cleanup_calls):
     attempts = {"count": 0}
 
     async def fake_generate_and_rm_group(args, group, sampling_params, evaluation=False):
@@ -178,6 +199,7 @@ def test_partial_async_rollout_retries_aborted_group(monkeypatch):
 
     assert attempts["count"] == 2
     assert len(data.requeued) == 1
+    assert group_cleanup_calls == [[0]]
     assert result[0][0].status == SampleLike.Status.COMPLETED
     assert result[0][0].session_id == "new-session"
 
