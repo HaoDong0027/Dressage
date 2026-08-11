@@ -13,6 +13,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from dressage.transport import TQFieldRef
+
 from .reasoning_parser import canonicalize_reasoning_content
 from .tool_call_ids import canonicalize_openclaw_tool_call_id
 
@@ -97,12 +99,12 @@ class StepRecord:
     request_messages: list[dict]
     normalized_request_messages: list[dict]
     prompt_token_ids: list[int]
-    prompt_token_logprobs: list[float]
+    prompt_token_logprobs: list[float] | TQFieldRef
     snapshot_token_ids: list[int]
     response_token_ids: list[int]
-    response_logprobs: list[float]
+    response_logprobs: list[float] | TQFieldRef
     all_token_ids: list[int]
-    all_logprobs: list[float]
+    all_logprobs: list[float] | TQFieldRef
     input_token_texts: list[str]
     output_token_texts: list[str]
     messages_snapshot: list[dict]
@@ -123,14 +125,16 @@ class StepRecord:
     all_versions: list[str] = field(default_factory=list)
     all_logprobs_invalid: bool = False
     concat_token_ids: list[int] = field(default_factory=list)
-    concat_response_logprobs: list[float] = field(default_factory=list)
+    concat_response_logprobs: list[float] | TQFieldRef = field(default_factory=list)
     concat_response_mask: list[int] = field(default_factory=list)
     concat_versions: list[str] = field(default_factory=list)
     concat_context_token_count: int = 0
     concat_output_token_count: int = 0
     concat_logprobs_invalid: bool = False
     concat_incremental_tokenization_failed: bool = False
-    response_routed_experts_chunks: list[dict[str, Any]] = field(default_factory=list)
+    response_routed_experts_chunks: list[dict[str, Any]] | TQFieldRef = field(
+        default_factory=list
+    )
     tools: list[dict[str, Any]] | None = None
     segment_boundary_before: bool = False
     rewrite_reason: str | None = None
@@ -151,6 +155,7 @@ class Session:
 
     session_id: str
     instance_id: str
+    incarnation_id: str | None = field(default=None, repr=False)
     steps: list[StepRecord] = field(default_factory=list)
     history_rewritten: bool = False
     rewrite_reason: str | None = None
@@ -412,13 +417,13 @@ class SessionManager:
         request_messages: list[dict],
         normalized_request_messages: list[dict],
         prompt_token_ids: list[int],
-        prompt_token_logprobs: list[float],
+        prompt_token_logprobs: list[float] | TQFieldRef,
         snapshot_token_ids: list[int],
         response_token_ids: list[int],
-        response_logprobs: list[float],
+        response_logprobs: list[float] | TQFieldRef,
         response_versions: list[str] | None = None,
         all_token_ids: list[int],
-        all_logprobs: list[float],
+        all_logprobs: list[float] | TQFieldRef,
         all_versions: list[str] | None = None,
         prompt_versions: list[str] | None = None,
         input_token_texts: list[str],
@@ -427,14 +432,14 @@ class SessionManager:
         raw_response_text: str,
         all_logprobs_invalid: bool = False,
         concat_token_ids: list[int] | None = None,
-        concat_response_logprobs: list[float] | None = None,
+        concat_response_logprobs: list[float] | TQFieldRef | None = None,
         concat_response_mask: list[int] | None = None,
         concat_versions: list[str] | None = None,
         concat_context_token_count: int = 0,
         concat_output_token_count: int = 0,
         concat_logprobs_invalid: bool = False,
         concat_incremental_tokenization_failed: bool = False,
-        response_routed_experts_chunks: list[dict[str, Any]] | None = None,
+        response_routed_experts_chunks: list[dict[str, Any]] | TQFieldRef | None = None,
         tools: list[dict[str, Any]] | None = None,
         segment_boundary_before: bool = False,
         rewrite_reason: str | None = None,
@@ -482,7 +487,11 @@ class SessionManager:
                 prompt_token_logprobs=prompt_token_logprobs,
                 snapshot_token_ids=snapshot_token_ids,
                 response_token_ids=response_token_ids,
-                response_logprobs=response_logprobs,
+                response_logprobs=(
+                    response_logprobs
+                    if isinstance(response_logprobs, TQFieldRef)
+                    else list(response_logprobs)
+                ),
                 response_versions=list(response_versions or []),
                 all_token_ids=all_token_ids,
                 all_logprobs=all_logprobs,
@@ -507,7 +516,11 @@ class SessionManager:
                 ),
                 all_logprobs_invalid=all_logprobs_invalid,
                 concat_token_ids=list(concat_token_ids or []),
-                concat_response_logprobs=list(concat_response_logprobs or []),
+                concat_response_logprobs=(
+                    concat_response_logprobs
+                    if isinstance(concat_response_logprobs, TQFieldRef)
+                    else list(concat_response_logprobs or [])
+                ),
                 concat_response_mask=list(concat_response_mask or []),
                 concat_versions=list(concat_versions or []),
                 concat_context_token_count=concat_context_token_count,
@@ -516,9 +529,14 @@ class SessionManager:
                 concat_incremental_tokenization_failed=(
                     concat_incremental_tokenization_failed
                 ),
-                response_routed_experts_chunks=[
-                    dict(item) for item in (response_routed_experts_chunks or [])
-                ],
+                response_routed_experts_chunks=(
+                    response_routed_experts_chunks
+                    if isinstance(response_routed_experts_chunks, TQFieldRef)
+                    else [
+                        dict(item)
+                        for item in (response_routed_experts_chunks or [])
+                    ]
+                ),
                 tools=tools,
                 segment_boundary_before=segment_boundary_before,
                 rewrite_reason=rewrite_reason,

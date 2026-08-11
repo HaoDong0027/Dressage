@@ -39,7 +39,6 @@ from dressage.rollout.artifacts.samples import (
 )
 from dressage.rollout.artifacts.writer import DEFAULT_WRITER as _ARTIFACT_WRITER
 from dressage.rollout.generate.runtime import (
-    discard_proxy_session_best_effort,
     get_paddock_from_env,
     get_proxy_client,
     maybe_await,
@@ -268,7 +267,6 @@ async def generate(
         extra_env_args=extra_env_args,
     )
     paddock = None
-    proxy_client = None
     state = None
     initialized = False
     agent_response = ""
@@ -490,10 +488,6 @@ async def generate(
             sample, session_id=session_id, instance_id=instance_id
         )
         _set_status(sample, "ABORTED")
-        await discard_proxy_session_best_effort(
-            session_id,
-            proxy_client=proxy_client,
-        )
         return sample
     finally:
         if initialized and paddock is not None:

@@ -387,6 +387,35 @@ def test_generate_runtime_rejects_whitebox_mode_for_blackbox(monkeypatch):
         generate_runtime._PADDOCK = previous
 
 
+@pytest.mark.asyncio
+async def test_discard_rollout_groups_deduplicates_trajectory_ids(monkeypatch):
+    discarded: list[str] = []
+
+    async def fake_discard(session_id, *, proxy_client=None):
+        del proxy_client
+        discarded.append(session_id)
+        return True
+
+    monkeypatch.setattr(
+        generate_runtime,
+        "discard_proxy_session_best_effort",
+        fake_discard,
+    )
+    groups = [
+        [
+            SimpleNamespace(metadata={"parent_traj_id": "traj-a"}),
+            SimpleNamespace(metadata={"parent_traj_id": "traj-a"}),
+            SimpleNamespace(metadata={"last_failed_session_id": "traj-b"}),
+        ],
+        [SimpleNamespace(session_id="traj-c", metadata={})],
+    ]
+
+    result = await generate_runtime.discard_rollout_groups_best_effort(groups)
+
+    assert result is True
+    assert discarded == ["traj-a", "traj-b", "traj-c"]
+
+
 def test_blackbox_dispatch_passes_max_steps_env_in_register_payload(monkeypatch):
     asyncio.run(
         _run_blackbox_dispatch_passes_max_steps_env_in_register_payload(monkeypatch)
@@ -1029,11 +1058,11 @@ async def _run_blackbox_dispatch_required_execute_cmd_failure_aborts(monkeypatch
     assert sample.metadata["execute_cmds"][0]["cmd_result"]["returncode"] == 2
     assert "required execute_cmd failed" in sample.metadata["blackbox_error"]
     assert not [call for call in paddock.calls if call[0] == "call_agent"]
-    assert [
+    assert not [
         call
         for call in generate_runtime._PROXY_CLIENT.calls
         if call[0] == "discard"
-    ] == [("discard", sample.metadata["last_failed_session_id"])]
+    ]
 
 
 def test_blackbox_dispatch_optional_execute_cmd_failure_continues(monkeypatch):
@@ -1258,7 +1287,7 @@ async def _run_blackbox_dispatch_backend_timeout_still_aborts(monkeypatch):
         "call_agent",
         "terminate",
     ]
-    assert proxy.calls == [("discard", "bbs-sess-7")]
+    assert proxy.calls == []
 
 
 def test_blackbox_dispatch_optional_execute_cmd_http_failure_continues(monkeypatch):
@@ -1447,7 +1476,6 @@ async def _run_blackbox_dispatch_retry_uses_new_session_id_after_abort(monkeypat
         for call in paddock.calls
     )
     assert proxy.calls == [
-        ("discard", first_session_id),
         ("finalize", retry_session_id, "7", None),
         (
             "read",

@@ -144,3 +144,20 @@ def test_train_async_entrypoint_uses_slime_common_parser():
     assert "from slime.utils.arguments import parse_args" in source
     assert "add_dressage_arguments" not in source
     assert "train(parse_args())" in source
+
+
+def test_dressage_claw_script_supports_optional_transfer_queue():
+    source = Path(
+        "examples/scripts/run_dressage_claw_qwen3.6_35b_a3b_sync_4_node.sh"
+    ).read_text()
+
+    assert "TRAIN_ENTRY=(python3 train.py)" in source
+    assert "TRAIN_ENTRY=(python3 -m dressage.training.tq_train)" in source
+    assert "--enable-transfer-queue" in source
+    assert "--transfer-queue-config" in source
+    assert "--transfer-queue-retention-seconds" in source
+    assert "--transfer-params" in source
+    assert '"DRESSAGE_ENABLE_TRANSFER_QUEUE"' in source
+    assert '"DRESSAGE_TRANSFER_QUEUE_STORE_ID"' in source
+    assert "dressage_start_memory_monitor" in source
+    assert "dressage_stop_memory_monitor" in source

@@ -40,7 +40,6 @@ from dressage.rollout.artifacts.samples import (
     set_status as _set_status,
 )
 from dressage.rollout.generate.runtime import (
-    discard_proxy_session_best_effort,
     get_paddock_from_env,
     get_proxy_client,
     maybe_await,
@@ -148,14 +147,6 @@ class WhiteboxAgent(ABC):
         _set_status(sample, "ABORTED")
         return sample
 
-    async def _abort_and_discard(self, sample: Any) -> Any:
-        aborted = self._abort(sample)
-        await discard_proxy_session_best_effort(
-            self.session_id,
-            proxy_client=self.proxy,
-        )
-        return aborted
-
     async def _finalize_trajectory(
         self, sample: Any, agent_response: str,
     ) -> Any:
@@ -177,14 +168,14 @@ class WhiteboxAgent(ABC):
                 "drain failed session=%s instance=%s",
                 self.session_id, self.instance_id,
             )
-            return await self._abort_and_discard(sample)
+            return self._abort(sample)
 
         if not segments:
             logger.warning(
                 "no segments returned session=%s instance=%s",
                 self.session_id, self.instance_id,
             )
-            return await self._abort_and_discard(sample)
+            return self._abort(sample)
 
         return multi_segment.expand_segments_to_samples(
             sample,
@@ -269,14 +260,14 @@ class PaddockWhiteboxAgent(WhiteboxAgent):
                 "drain failed session=%s instance=%s",
                 self.session_id, self.instance_id,
             )
-            return await self._abort_and_discard(sample)
+            return self._abort(sample)
 
         if not segments:
             logger.warning(
                 "no segments returned session=%s instance=%s",
                 self.session_id, self.instance_id,
             )
-            return await self._abort_and_discard(sample)
+            return self._abort(sample)
 
         try:
             await DEFAULT_WRITER.write_session_payload(
@@ -362,7 +353,7 @@ def make_generate(agent_cls: type[WhiteboxAgent]):
                     "rollout raised session=%s instance=%s",
                     agent.session_id, agent.instance_id,
                 )
-                return await agent._abort_and_discard(sample)
+                return agent._abort(sample)
             return await agent._finalize_trajectory(
                 sample, agent_response or "",
             )

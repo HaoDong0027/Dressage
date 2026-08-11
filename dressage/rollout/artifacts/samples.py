@@ -7,6 +7,12 @@ import logging
 import uuid
 from typing import Any
 
+from dressage.transport import (
+    TQ_SAMPLE_REF_METADATA_KEY,
+    TQFieldLayout,
+    is_tq_field_layout_dict,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -220,13 +226,23 @@ def _segment_masks_nonlast_version_tokens(segment: dict[str, Any]) -> bool:
 
 def _segment_arrays(
     segment: dict[str, Any],
-) -> tuple[list[Any], list[int], list[float], list[str] | None]:
+) -> tuple[
+    list[Any],
+    list[int],
+    list[float] | TQFieldLayout,
+    list[str] | None,
+]:
     tokens = _required_segment_list(segment, "tokens")
     full_loss_mask = _normalize_segment_loss_mask(
         _required_segment_list(segment, "full_loss_mask")
     )
-    full_logprobs = _normalize_segment_logprobs(
-        _required_segment_list(segment, "full_logprobs")
+    raw_logprobs = segment.get("full_logprobs")
+    full_logprobs = (
+        TQFieldLayout.from_dict(raw_logprobs)
+        if is_tq_field_layout_dict(raw_logprobs)
+        else _normalize_segment_logprobs(
+            _required_segment_list(segment, "full_logprobs")
+        )
     )
     raw_versions = segment.get("full_versions")
     full_versions = (
@@ -240,7 +256,16 @@ def _segment_arrays(
         raise ValueError(
             f"tokens length {len(tokens)} != full_loss_mask length {len(full_loss_mask)}"
         )
-    if len(tokens) != len(full_logprobs):
+    if (
+        isinstance(full_logprobs, TQFieldLayout)
+        and len(tokens) != full_logprobs.token_count
+    ):
+        raise ValueError(
+            "tokens length "
+            f"{len(tokens)} != full_logprobs layout length "
+            f"{full_logprobs.token_count}"
+        )
+    if isinstance(full_logprobs, list) and len(tokens) != len(full_logprobs):
         raise ValueError(
             "tokens length "
             f"{len(tokens)} != full_logprobs length {len(full_logprobs)}"
@@ -280,7 +305,8 @@ def write_sample_from_segment(
     if truncated:
         tokens = tokens[:token_cap]
         full_loss_mask = full_loss_mask[:token_cap]
-        full_logprobs = full_logprobs[:token_cap]
+        if isinstance(full_logprobs, list):
+            full_logprobs = full_logprobs[:token_cap]
         if full_versions is not None:
             full_versions = full_versions[:token_cap]
         logger.warning(
@@ -305,12 +331,19 @@ def write_sample_from_segment(
     sample.tokens = tokens
     sample.response_length = response_length
     sample.loss_mask = train_full_loss_mask[response_start:]
-    sample.rollout_log_probs = full_logprobs[response_start:]
+    sample.rollout_log_probs = (
+        None
+        if isinstance(full_logprobs, TQFieldLayout)
+        else full_logprobs[response_start:]
+    )
     if len(sample.loss_mask) != response_length:
         raise ValueError(
             f"loss_mask length {len(sample.loss_mask)} != response_length {response_length}"
         )
-    if len(sample.rollout_log_probs) != response_length:
+    if (
+        sample.rollout_log_probs is not None
+        and len(sample.rollout_log_probs) != response_length
+    ):
         raise ValueError(
             "rollout_log_probs length "
             f"{len(sample.rollout_log_probs)} != response_length {response_length}"
@@ -347,14 +380,34 @@ def write_sample_from_segment(
     ]
     if truncated:
         sample.metadata["truncated"] = True
-    routed_experts = extract_routed_experts(
-        segment,
-        args,
-        expected_token_count=len(tokens),
+    layouts: dict[str, dict[str, Any]] = {}
+    if isinstance(full_logprobs, TQFieldLayout):
+        layouts[full_logprobs.logical_field] = full_logprobs.to_dict()
+    raw_routed_experts = segment.get("routed_experts_chunks")
+    routed_experts_layout = (
+        TQFieldLayout.from_dict(raw_routed_experts)
+        if is_tq_field_layout_dict(raw_routed_experts)
+        else None
     )
+    if routed_experts_layout is not None:
+        layouts[routed_experts_layout.logical_field] = (
+            routed_experts_layout.to_dict()
+        )
+        routed_experts = None
+    else:
+        routed_experts = extract_routed_experts(
+            segment,
+            args,
+            expected_token_count=len(tokens),
+        )
+    if layouts:
+        sample.metadata[TQ_SAMPLE_REF_METADATA_KEY] = layouts
     if routed_experts is not None:
         sample.rollout_routed_experts = routed_experts
-    elif getattr(args, "use_rollout_routing_replay", False):
+    elif (
+        routed_experts_layout is None
+        and getattr(args, "use_rollout_routing_replay", False)
+    ):
         raise ValueError(
             "use_rollout_routing_replay is enabled but segment contains no routed_experts. "
             "Pass --use-rollout-routing-replay when starting the Dressage proxy."
