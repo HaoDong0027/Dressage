@@ -208,13 +208,7 @@ The experiment uses Qwen3.6-35B-A3B and synchronous GRPO training on two nodes w
 Process memory is measured using PSS, while Ray Object Store memory uses the actual used capacity returned by the monitoring interface. The trajectory data plane on the master node is defined as:
 
 $$
-\begin{aligned}
-M_{\mathrm{Master}} ={}& M_{\mathrm{Proxy}}^{\mathrm{PSS}}
-+ M_{\mathrm{RolloutManager}}^{\mathrm{PSS}} \\
-&+ M_{\mathrm{ObjectStore,Master}}^{\mathrm{used}} \\
-&+ M_{\mathrm{TQController}}^{\mathrm{PSS}}
-+ M_{\mathrm{TQStorageUnit}}^{\mathrm{PSS}}
-\end{aligned}
+M_{\mathrm{Master}} = M_{\mathrm{Proxy}}^{\mathrm{PSS}} + M_{\mathrm{RolloutManager}}^{\mathrm{PSS}} + M_{\mathrm{ObjectStore,Master}}^{\mathrm{PSS}} + M_{\mathrm{TQController}}^{\mathrm{PSS}} + M_{\mathrm{TQStorageUnit}}^{\mathrm{PSS}}
 $$
 
 This metric excludes model weights, training processes, CUDA memory, and HiCache.

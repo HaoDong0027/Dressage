@@ -24,6 +24,8 @@ BatchGet = Callable[..., Any]
 
 
 def validate_tq_training_config(args: Any) -> None:
+    if bool(getattr(args, "debug_rollout_only", False)):
+        raise ValueError("TransferQueue does not support --debug-rollout-only")
     config_path = getattr(args, "mopd_teacher_config", None) or os.environ.get(
         "DRESSAGE_MOPD_TEACHER_CONFIG"
     )

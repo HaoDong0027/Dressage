@@ -216,13 +216,7 @@ Expert ID 是非负整数，其存储宽度只需覆盖模型实际的专家编�
 进程内存采用 PSS，Ray Object Store 使用监控接口返回的实际已用容量。本文将 Master 轨迹数据面定义为：
 
 $$
-\begin{aligned}
-M_{\mathrm{Master}} ={}& M_{\mathrm{Proxy}}^{\mathrm{PSS}}
-+ M_{\mathrm{RolloutManager}}^{\mathrm{PSS}} \\
-&+ M_{\mathrm{ObjectStore,Master}}^{\mathrm{used}} \\
-&+ M_{\mathrm{TQController}}^{\mathrm{PSS}}
-+ M_{\mathrm{TQStorageUnit}}^{\mathrm{PSS}}
-\end{aligned}
+M_{\mathrm{Master}} = M_{\mathrm{Proxy}}^{\mathrm{PSS}} + M_{\mathrm{RolloutManager}}^{\mathrm{PSS}} + M_{\mathrm{ObjectStore,Master}}^{\mathrm{PSS}} + M_{\mathrm{TQController}}^{\mathrm{PSS}} + M_{\mathrm{TQStorageUnit}}^{\mathrm{PSS}}
 $$
 
 该指标不包括模型权重、训练进程、CUDA memory 和 HiCache。
