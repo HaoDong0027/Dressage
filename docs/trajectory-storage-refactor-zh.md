@@ -20,21 +20,21 @@ payload 从 Proxy、RolloutManager 和 Ray Object Store 构成的集中式路径
 
 Agentic RL 的 trajectory 同时包含 messages、tools 和 lineage 等交互信息，以及 token IDs、`logprobs`、loss mask、token versions 和 R3 Expert ID 等 token 级字段。前四类 token 级字段随序列长度线性增长；R3 还要为每个 token 记录多个 MoE 层上的 top-k 专家选择：
 
-$$
+```math
 S_{\mathrm{R3}}
 = N_{\mathrm{token}}
 \times L_{\mathrm{MoE}}
 \times K_{\mathrm{top\text{-}k}}
 \times D_{\mathrm{ExpertID}}
 \times N_{\mathrm{trajectory}}
-$$
+```
 
 以 [GLM-5.2-744B-A40B](https://huggingface.co/zai-org/GLM-5.2) 为例，按 75 个 MoE 层、routing top-k 为 8、Expert ID 使用 int32 计算，当单个 Segment 长度为 256K、rollout batch size 为 512、每个 prompt 采样 8 条轨迹时，batch 中共有 4,096 条轨迹：
 
-$$
+```math
 256\mathrm{K} \times 75 \times 8 \times 4\ \mathrm{bytes} \times 4{,}096
 \approx 2.34\ \mathrm{TiB}
-$$
+```
 
 即使每条 trajectory 只有一个满长 Segment，仅 R3 Expert ID 的理论数据量也已达到 **2.34 TiB**。
 
@@ -46,25 +46,25 @@ $$
 
 ![上下文窗口约束单个 Segment，而不是完整 trajectory 总量](../assets/trajectory-storage/context-window-segment-expansion.png)
 
-*图 2：第 $i$ 条 trajectory 产生 $X_i$ 个 Segment，最终 Segment 数为 $\sum_i X_i$，而不是展开后的 rollout session 数 $B$。*
+*图 2：*第 $i$ 条 trajectory 产生 $X_i$ 个 Segment，最终 Segment 数为 $\sum_i X_i$，而不是展开后的 rollout session 数 $B$。
 
 设 batch 中有 $B$ 条 trajectory，第 $i$ 条 trajectory 包含 $X_i$ 个 Segment，则活跃 Segment 总数为：
 
-$$
+```math
 N_{\mathrm{segment}}
 = \sum_{i=1}^{B} X_i
 \approx B\bar{X}
-$$
+```
 
 其中，$\bar{X}$ 是每条 trajectory 的平均 Segment 数。上下文窗口只能给出单个 Segment 的上界，无法直接给出 $\bar{X}$，因此容量规划不能简单使用“batch size × context window”。
 
 对于包含多个 Segment 的 trajectory，原集中式路径需要承载的完整 Segment 工作集近似为：
 
-$$
+```math
 S_{\mathrm{R3}}
 = \sum_{i=1}^{B}\sum_{j=1}^{X_i}
 T_{ij} \times L \times K \times D
-$$
+```
 
 其中，$T_{ij}$ 是第 $i$ 条 trajectory 的第 $j$ 个 Segment 的 token 数，$L$ 是记录的层数，$K$ 是 routing top-k，$D$ 是单个 Expert ID 的字节数。
 
@@ -75,9 +75,9 @@ $$
 
 前述 2.34 TiB 对应 4,096 条轨迹各包含一个满长 Segment 的情况。如果每条 trajectory 平均产生 $\bar{X}$ 个接近 256K 的 Segment，则 R3 Expert ID 的理论数据规模近似为：
 
-$$
+```math
 S_{\mathrm{R3}}\approx 2.34\times\bar{X}\ \mathrm{TiB}
-$$
+```
 
 在极端场景下，若平均 Segment 数达到 10，仅 R3 Expert ID 的数据规模就会增长至约 23.4 TiB。如果 rollout 的生产速度暂时超过 training 的消费速度，未消费的 Segment 还会在数据链路中积压。因此，一个在训练早期内存充足的系统，仍可能随着 Segment 长度和数量增长，在训练后期发生 OOM。
 
@@ -215,9 +215,9 @@ Expert ID 是非负整数，其存储宽度只需覆盖模型实际的专家编�
 
 进程内存采用 PSS，Ray Object Store 使用监控接口返回的实际已用容量。本文将 Master 轨迹数据面定义为：
 
-$$
+```math
 M_{\mathrm{Master}} = M_{\mathrm{Proxy}}^{\mathrm{PSS}} + M_{\mathrm{RolloutManager}}^{\mathrm{PSS}} + M_{\mathrm{ObjectStore,Master}}^{\mathrm{PSS}} + M_{\mathrm{TQController}}^{\mathrm{PSS}} + M_{\mathrm{TQStorageUnit}}^{\mathrm{PSS}}
-$$
+```
 
 该指标不包括模型权重、训练进程、CUDA memory 和 HiCache。
 

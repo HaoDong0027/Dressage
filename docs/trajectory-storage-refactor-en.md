@@ -16,21 +16,21 @@ In the two-node Qwen3.6-35B-A3B main experiment, after enabling TransferQueue an
 
 An Agentic RL trajectory contains interaction data such as messages, tools, and lineage, as well as token-level fields including token IDs, `logprobs`, loss masks, token versions, and R3 Expert IDs. The first four token-level fields grow linearly with sequence length, whereas R3 must additionally record the top-k expert selections across multiple MoE layers for every token:
 
-$$
+```math
 S_{\mathrm{R3}}
 = N_{\mathrm{token}}
 \times L_{\mathrm{MoE}}
 \times K_{\mathrm{top\text{-}k}}
 \times D_{\mathrm{ExpertID}}
 \times N_{\mathrm{trajectory}}
-$$
+```
 
 Consider [GLM-5.2-744B-A40B](https://huggingface.co/zai-org/GLM-5.2), with 75 MoE layers, routing top-k of 8, and int32 Expert IDs. With a Segment length of 256K, a rollout batch size of 512, and 8 trajectories sampled per prompt, the batch contains 4,096 trajectories:
 
-$$
+```math
 256\mathrm{K} \times 75 \times 8 \times 4\ \mathrm{bytes} \times 4{,}096
 \approx 2.34\ \mathrm{TiB}
-$$
+```
 
 Even if each trajectory contains only one full-length Segment, the theoretical size of the R3 Expert IDs alone reaches **2.34 TiB**.
 
@@ -42,25 +42,25 @@ Three concepts must be distinguished when discussing trajectory scale. A rollout
 
 ![The context window bounds an individual Segment, not the total length of a complete trajectory](../assets/trajectory-storage/context-window-segment-expansion.png)
 
-*Figure 2: Trajectory $i$ produces $X_i$ Segments. The final number of Segments is $\sum_i X_i$, rather than the expanded rollout-session count $B$.*
+*Figure 2:* Trajectory $i$ produces $X_i$ Segments. The final number of Segments is $\sum_i X_i$, rather than the expanded rollout-session count $B$.
 
 Suppose a batch contains $B$ trajectories and trajectory $i$ contains $X_i$ Segments. The total number of active Segments is:
 
-$$
+```math
 N_{\mathrm{segment}}
 = \sum_{i=1}^{B} X_i
 \approx B\bar{X}
-$$
+```
 
 Here, $\bar{X}$ is the average number of Segments per trajectory. The context window only provides an upper bound for an individual Segment and does not determine $\bar{X}$. Capacity planning therefore cannot rely on “batch size × context window” alone.
 
 For trajectories containing multiple Segments, the full Segment working set carried by the original centralized path is approximately:
 
-$$
+```math
 S_{\mathrm{R3}}
 = \sum_{i=1}^{B}\sum_{j=1}^{X_i}
 T_{ij} \times L \times K \times D
-$$
+```
 
 Here, $T_{ij}$ is the number of tokens in Segment $j$ of trajectory $i$, $L$ is the number of recorded layers, $K$ is routing top-k, and $D$ is the number of bytes per Expert ID.
 
@@ -71,9 +71,9 @@ In many Agentic RL tasks, models may perform longer reasoning, invoke more round
 
 The preceding 2.34 TiB corresponds to 4,096 trajectories, each containing one full-length Segment. If every trajectory produces an average of $\bar{X}$ Segments that each approach 256K tokens, the theoretical size of the R3 Expert IDs is approximately:
 
-$$
+```math
 S_{\mathrm{R3}}\approx 2.34\times\bar{X}\ \mathrm{TiB}
-$$
+```
 
 In an extreme scenario where the average Segment count reaches 10, the R3 Expert IDs alone grow to approximately 23.4 TiB. If rollout production temporarily exceeds training consumption, unconsumed Segments also accumulate in the data path. A system with sufficient memory early in training may therefore still encounter OOM later as both Segment length and Segment count increase.
 
@@ -207,9 +207,9 @@ The experiment uses Qwen3.6-35B-A3B and synchronous GRPO training on two nodes w
 
 Process memory is measured using PSS, while Ray Object Store memory uses the actual used capacity returned by the monitoring interface. The trajectory data plane on the master node is defined as:
 
-$$
+```math
 M_{\mathrm{Master}} = M_{\mathrm{Proxy}}^{\mathrm{PSS}} + M_{\mathrm{RolloutManager}}^{\mathrm{PSS}} + M_{\mathrm{ObjectStore,Master}}^{\mathrm{PSS}} + M_{\mathrm{TQController}}^{\mathrm{PSS}} + M_{\mathrm{TQStorageUnit}}^{\mathrm{PSS}}
-$$
+```
 
 This metric excludes model weights, training processes, CUDA memory, and HiCache.
 
