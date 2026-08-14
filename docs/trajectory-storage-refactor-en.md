@@ -38,13 +38,13 @@ Even if each trajectory contains only one full-length Segment, the theoretical s
 
 In black-box Agent training, the context window limits what a single model invocation can observe, not the cumulative length of a complete trajectory. An Agent can compress or rewrite its history near the context limit and continue interacting. Dressage stores these phases as Segments, so one trajectory may correspond to multiple Segments that each approach the context limit.
 
-Three concepts must be distinguished when discussing trajectory scale. A rollout session is a complete interaction that may contain multiple dialogue turns, tool calls, branches, and retries. A StepRecord records one model invocation within that session. A Segment is a trainable trajectory unit constructed from one or more StepRecords according to a timeline or lineage view; its tokens may be organized using TITO semantics, and its length is bounded by the model context window. In the figure, `B` denotes the number of rollout sessions after expansion by samples per prompt. It is determined jointly by the prompt batch size and the number of samples per prompt, and is not equal to the final number of Segments.
+Three concepts must be distinguished when discussing trajectory scale. A rollout session is a complete interaction that may contain multiple dialogue turns, tool calls, branches, and retries. A StepRecord records one model invocation within that session. A Segment is a trainable trajectory unit constructed from one or more StepRecords according to a timeline or lineage view; its tokens may be organized using TITO semantics, and its length is bounded by the model context window. In the figure, $`B`$ denotes the number of rollout sessions after expansion by samples per prompt. It is determined jointly by the prompt batch size and the number of samples per prompt, and is not equal to the final number of Segments.
 
 ![The context window bounds an individual Segment, not the total length of a complete trajectory](../assets/trajectory-storage/context-window-segment-expansion.png)
 
-*Figure 2:* Trajectory $i$ produces $X_i$ Segments. The final number of Segments is $\sum_i X_i$, rather than the expanded rollout-session count $B$.
+**Figure 2:** Trajectory $`i`$ produces $`X_i`$ Segments. The final number of Segments is $`\sum_i X_i`$, rather than the expanded rollout-session count $`B`$.
 
-Suppose a batch contains $B$ trajectories and trajectory $i$ contains $X_i$ Segments. The total number of active Segments is:
+Suppose a batch contains $`B`$ trajectories and trajectory $`i`$ contains $`X_i`$ Segments. The total number of active Segments is:
 
 ```math
 N_{\mathrm{segment}}
@@ -52,7 +52,7 @@ N_{\mathrm{segment}}
 \approx B\bar{X}
 ```
 
-Here, $\bar{X}$ is the average number of Segments per trajectory. The context window only provides an upper bound for an individual Segment and does not determine $\bar{X}$. Capacity planning therefore cannot rely on “batch size × context window” alone.
+Here, $`\bar{X}`$ is the average number of Segments per trajectory. The context window only provides an upper bound for an individual Segment and does not determine $`\bar{X}`$. Capacity planning therefore cannot rely on “batch size × context window” alone.
 
 For trajectories containing multiple Segments, the full Segment working set carried by the original centralized path is approximately:
 
@@ -62,14 +62,14 @@ S_{\mathrm{R3}}
 T_{ij} \times L \times K \times D
 ```
 
-Here, $T_{ij}$ is the number of tokens in Segment $j$ of trajectory $i$, $L$ is the number of recorded layers, $K$ is routing top-k, and $D$ is the number of bytes per Expert ID.
+Here, $`T_{ij}`$ is the number of tokens in Segment $`j`$ of trajectory $`i`$, $`L`$ is the number of recorded layers, $`K`$ is routing top-k, and $`D`$ is the number of bytes per Expert ID.
 
 In many Agentic RL tasks, models may perform longer reasoning, invoke more rounds of tools, or explore more steps before obtaining a successful reward as training progresses. Even with a fixed nominal rollout batch size, trajectory scale can grow along two dimensions:
 
-1. The token count $T_{ij}$ of each Segment can approach the context-window limit, causing all token-level fields to grow linearly.
-2. When a complete interaction crosses a context-window boundary, the number of Segments $X_i$ in a trajectory can increase from 1 to 2, 3, or more.
+1. The token count $`T_{ij}`$ of each Segment can approach the context-window limit, causing all token-level fields to grow linearly.
+2. When a complete interaction crosses a context-window boundary, the number of Segments $`X_i`$ in a trajectory can increase from 1 to 2, 3, or more.
 
-The preceding 2.34 TiB corresponds to 4,096 trajectories, each containing one full-length Segment. If every trajectory produces an average of $\bar{X}$ Segments that each approach 256K tokens, the theoretical size of the R3 Expert IDs is approximately:
+The preceding 2.34 TiB corresponds to 4,096 trajectories, each containing one full-length Segment. If every trajectory produces an average of $`\bar{X}`$ Segments that each approach 256K tokens, the theoretical size of the R3 Expert IDs is approximately:
 
 ```math
 S_{\mathrm{R3}}\approx 2.34\times\bar{X}\ \mathrm{TiB}

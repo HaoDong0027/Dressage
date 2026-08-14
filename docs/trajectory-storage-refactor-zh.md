@@ -42,13 +42,13 @@ S_{\mathrm{R3}}
 
 在黑盒 Agent 训练中，上下文窗口限制的是一次模型调用可见的内容，而不是完整 trajectory 的累计长度。Agent 可以在接近窗口上限后压缩或重写历史并继续交互；Dressage 以 Segment 保存这些阶段性轨迹，因此一条 trajectory 可能对应多个接近上下文上限的 Segment。
 
-讨论轨迹规模时，需要先区分三个概念：rollout session 表示一次可能包含多轮对话、工具调用、分支和重试的完整交互；StepRecord 记录其中一次模型调用；Segment 则是由一个或多个 StepRecord 按 timeline 或 lineage 视图构建的可训练轨迹单元，其 token 组织可以采用 TITO 语义，长度受模型 context window 限制。图中的 B 表示按 samples per prompt 展开后的 rollout session 数量，由 prompt batch size 与每个 prompt 的采样数共同决定，并不等于最终生成的 Segment 数量。
+讨论轨迹规模时，需要先区分三个概念：rollout session 表示一次可能包含多轮对话、工具调用、分支和重试的完整交互；StepRecord 记录其中一次模型调用；Segment 则是由一个或多个 StepRecord 按 timeline 或 lineage 视图构建的可训练轨迹单元，其 token 组织可以采用 TITO 语义，长度受模型 context window 限制。图中的 $`B`$ 表示按 samples per prompt 展开后的 rollout session 数量，由 prompt batch size 与每个 prompt 的采样数共同决定，并不等于最终生成的 Segment 数量。
 
 ![上下文窗口约束单个 Segment，而不是完整 trajectory 总量](../assets/trajectory-storage/context-window-segment-expansion.png)
 
-*图 2：*第 $i$ 条 trajectory 产生 $X_i$ 个 Segment，最终 Segment 数为 $\sum_i X_i$，而不是展开后的 rollout session 数 $B$。
+**图 2：** 第 $`i`$ 条 trajectory 产生 $`X_i`$ 个 Segment，最终 Segment 数为 $`\sum_i X_i`$，而不是展开后的 rollout session 数 $`B`$。
 
-设 batch 中有 $B$ 条 trajectory，第 $i$ 条 trajectory 包含 $X_i$ 个 Segment，则活跃 Segment 总数为：
+设 batch 中有 $`B`$ 条 trajectory，第 $`i`$ 条 trajectory 包含 $`X_i`$ 个 Segment，则活跃 Segment 总数为：
 
 ```math
 N_{\mathrm{segment}}
@@ -56,7 +56,7 @@ N_{\mathrm{segment}}
 \approx B\bar{X}
 ```
 
-其中，$\bar{X}$ 是每条 trajectory 的平均 Segment 数。上下文窗口只能给出单个 Segment 的上界，无法直接给出 $\bar{X}$，因此容量规划不能简单使用“batch size × context window”。
+其中，$`\bar{X}`$ 是每条 trajectory 的平均 Segment 数。上下文窗口只能给出单个 Segment 的上界，无法直接给出 $`\bar{X}`$，因此容量规划不能简单使用“batch size × context window”。
 
 对于包含多个 Segment 的 trajectory，原集中式路径需要承载的完整 Segment 工作集近似为：
 
@@ -66,14 +66,14 @@ S_{\mathrm{R3}}
 T_{ij} \times L \times K \times D
 ```
 
-其中，$T_{ij}$ 是第 $i$ 条 trajectory 的第 $j$ 个 Segment 的 token 数，$L$ 是记录的层数，$K$ 是 routing top-k，$D$ 是单个 Expert ID 的字节数。
+其中，$`T_{ij}`$ 是第 $`i`$ 条 trajectory 的第 $`j`$ 个 Segment 的 token 数，$`L`$ 是记录的层数，$`K`$ 是 routing top-k，$`D`$ 是单个 Expert ID 的字节数。
 
 在不少 Agentic RL 任务中，随着训练推进，模型可能进行更长的推理、调用更多轮工具，或者在获得成功奖励前探索更多步骤。即使名义 rollout batch size 保持不变，轨迹规模仍可能从两个维度增长：
 
-1. 单个 Segment 的 token 数 $T_{ij}$ 逐渐接近 context window 上限，使所有 token 级字段线性增长；
-2. 当完整交互跨越 context window 边界时，单条 trajectory 的 Segment 数 $X_i$ 可能从 1 增加到 2、3，甚至更多。
+1. 单个 Segment 的 token 数 $`T_{ij}`$ 逐渐接近 context window 上限，使所有 token 级字段线性增长；
+2. 当完整交互跨越 context window 边界时，单条 trajectory 的 Segment 数 $`X_i`$ 可能从 1 增加到 2、3，甚至更多。
 
-前述 2.34 TiB 对应 4,096 条轨迹各包含一个满长 Segment 的情况。如果每条 trajectory 平均产生 $\bar{X}$ 个接近 256K 的 Segment，则 R3 Expert ID 的理论数据规模近似为：
+前述 2.34 TiB 对应 4,096 条轨迹各包含一个满长 Segment 的情况。如果每条 trajectory 平均产生 $`\bar{X}`$ 个接近 256K 的 Segment，则 R3 Expert ID 的理论数据规模近似为：
 
 ```math
 S_{\mathrm{R3}}\approx 2.34\times\bar{X}\ \mathrm{TiB}
