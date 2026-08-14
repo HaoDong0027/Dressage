@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
@@ -21,6 +22,8 @@ ROUTED_EXPERTS_FIELD = "routed_experts"
 LayoutBundle = Mapping[str, dict[str, Any]]
 LayoutValueKey = tuple[str, str, str, str]
 BatchGet = Callable[..., Any]
+
+logger = logging.getLogger(__name__)
 
 
 def validate_tq_training_config(args: Any) -> None:
@@ -70,6 +73,28 @@ def clear_requests_from_layouts(
                 if fragment.ref.key not in keys:
                     keys.append(fragment.ref.key)
     return requests
+
+
+def clear_tq_rollout_data(rollout_data_ref: Sequence[Any]) -> None:
+    import ray
+    import transfer_queue as tq
+
+    requests: dict[str, set[str]] = {}
+    for boxed_ref in rollout_data_ref:
+        layouts = ray.get(boxed_ref.inner).get("prompt") or []
+        for partition, keys in clear_requests_from_layouts(layouts).items():
+            requests.setdefault(partition, set()).update(keys)
+    if not requests:
+        return
+
+    try:
+        tq.init()
+        for partition, keys in requests.items():
+            tq.kv_clear(keys=list(keys), partition_id=partition)
+    except Exception:
+        logger.exception(
+            "TransferQueue cleanup failed; retention will reclaim the data"
+        )
 
 
 def _value_key(ref: Any) -> LayoutValueKey:

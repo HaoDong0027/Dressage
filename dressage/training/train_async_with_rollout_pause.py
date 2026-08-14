@@ -127,7 +127,10 @@ def train(args):
 
     actor_cls = None
     if _env_flag("DRESSAGE_ENABLE_TRANSFER_QUEUE", False):
-        from dressage.training.tq_hydration import validate_tq_training_config
+        from dressage.training.tq_hydration import (
+            clear_tq_rollout_data,
+            validate_tq_training_config,
+        )
         from dressage.training.tq_megatron_actor import TQMegatronTrainRayActor
 
         validate_tq_training_config(args)
@@ -161,6 +164,8 @@ def train(args):
                 ray.get(actor_model.async_train(rollout_id, rollout_data_curr_ref, external_data=value_refs))
             else:
                 ray.get(value_refs)
+                if _env_flag("DRESSAGE_ENABLE_TRANSFER_QUEUE", False):
+                    clear_tq_rollout_data(rollout_data_curr_ref)
         else:
             ray.get(actor_model.async_train(rollout_id, rollout_data_curr_ref))
 

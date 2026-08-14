@@ -6,7 +6,10 @@ from slime.ray.placement_group import create_placement_groups, create_rollout_ma
 from slime.utils.arguments import parse_args
 from slime.utils.logging_utils import configure_logger, finish_tracking, init_tracking
 from slime.utils.misc import should_run_periodic_action
-from dressage.training.tq_hydration import validate_tq_training_config
+from dressage.training.tq_hydration import (
+    clear_tq_rollout_data,
+    validate_tq_training_config,
+)
 from dressage.training.tq_megatron_actor import TQMegatronTrainRayActor
 
 
@@ -56,6 +59,7 @@ def train(args):
                 ray.get(actor_model.async_train(rollout_id, rollout_data_curr_ref, external_data=value_refs))
             else:
                 ray.get(value_refs)
+                clear_tq_rollout_data(rollout_data_curr_ref)
         else:
             ray.get(actor_model.async_train(rollout_id, rollout_data_curr_ref))
 
