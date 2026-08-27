@@ -166,7 +166,7 @@ Step Balance 位于 Dressage Proxy 内部。上游 Agent 向 Proxy 发起 OpenAI
 
 调度器不能只看 snapshot 中已经被 Engine 观测到的负载。由于 snapshot 是异步刷新的，Proxy 刚刚派发的请求可能还没有反映在下一次 `/v1/loads` 结果里。如果忽略这部分增量，多个并发 step 会同时看到同一个低压 Engine，并做出相同选择。
 
-因此，Proxy 会把快照负载和本地尚未被快照覆盖的 scoring delta 合并为 effective load。对候选 Engine $`e`$，记 $`R_{\mathrm{run}}`$ 为有效 running requests，$`N_{\mathrm{token}}`$ 为有效 token 占用，$`Q_{\mathrm{wait}}`$ 为有效排队请求数，则：
+因此，Proxy 会把快照负载和本地尚未被快照覆盖的 scoring delta 合并为 effective load。对候选 Engine $e$，记 $R_{\mathrm{run}}$ 为有效 running requests， $N_{\mathrm{token}}$ 为有效 token 占用， $Q_{\mathrm{wait}}$ 为有效排队请求数，则：
 
 ```math
 \begin{aligned}
@@ -181,13 +181,13 @@ Q_{\mathrm{wait}}(e)
 \end{aligned}
 ```
 
-其中 $`R_{\mathrm{snapshot}}`$、$`N_{\mathrm{snapshot}}`$、$`Q_{\mathrm{snapshot}}`$ 分别对应快照中的 `running`、`active_tokens` 和 `queued`，$`\Delta N_{\mathrm{local}}`$、$`\Delta Q_{\mathrm{local}}`$ 来自 Proxy 本地 reservation。
+其中 $R_{\mathrm{snapshot}}$、 $N_{\mathrm{snapshot}}$、 $Q_{\mathrm{snapshot}}$ 分别对应快照中的 `running`、`active_tokens` 和 `queued`， $\Delta N_{\mathrm{local}}$、 $\Delta Q_{\mathrm{local}}$ 来自 Proxy 本地 reservation。
 
 一次 snapshot poll 在发起请求前记录当前 reservation revision。只有当该 poll 成功发布新快照时，poll 发起前已经存在的本地 delta 才会被 acknowledge 并停止参与 scoring；poll 期间新建的 reservation 以及失败 poll 前的 delta 仍然保留。因此，每条 delta 在新 snapshot 发布前参与打分，发布后退出打分，避免漏计或与 snapshot 重复累加。
 
 #### Per-Step 增量
 
-仅有当前快照还不够，调度还要把“如果当前 step 分配给这个 Engine，会额外制造多少压力”加入比较。记当前 step 的完整输入长度为 $`N_{\mathrm{prompt}}`$，它与 session 上一次 committed tokens 的最长公共前缀长度为 $`N_{\mathrm{lcp}}`$。每个候选 Engine 都会先增加一个 queue item：
+仅有当前快照还不够，调度还要把“如果当前 step 分配给这个 Engine，会额外制造多少压力”加入比较。记当前 step 的完整输入长度为 $N_{\mathrm{prompt}}$，它与 session 上一次 committed tokens 的最长公共前缀长度为 $N_{\mathrm{lcp}}$。每个候选 Engine 都会先增加一个 queue item：
 
 ```math
 \Delta Q_{\mathrm{step}}=1.
@@ -209,7 +209,7 @@ N_{\mathrm{prompt}},
 
 **为什么自愿迁移按完整 prompt 计分。** 留在 owner 时，历史前缀大概率已在本地 KV 中，容量压力只新增 suffix 部分；而迁移到另一台 Engine 时，目标侧能通过 Mooncake L3 恢复多少前缀，取决于恢复发生时的实际缓存状态——前缀是否仍在 L3、是否已被 evict、目标 Engine 当时还剩多少 available 空间——这些都无法在请求入口精确判定。如果 scoring 提前扣除“假定可恢复”的前缀，一旦实际命中低于预期，Proxy 就会系统性高估目标 Engine 的可用空间，把过多 step 引向看似低压的 Engine，造成过激迁移。因此 scoring 一律按最坏情况（完整 prompt 的容量压力）比较候选，即调度分数描述的是目标 Engine 接管当前 step 后的容量压力上界，而不是实际 prefill token 数。这个上界也不会长期失真：Engine 自报的 `token_usage` 会把真实缓存占用折算进 pressure，目标 Engine 上已恢复或共享的 KV 所形成的真实占用仍会体现出来，不会让目标显得比实际更空。
 
-实际执行和观测仍然需要记录 prefill 估计，因此 lifecycle reservation 会单独维护 page-aligned LCP。记 $`N_{\mathrm{lcp,page}}`$ 为按目标 Engine KV page size 向下对齐后的 LCP，$`N_{\mathrm{prefill}}`$ 为执行侧预估的 prefill token 数，则：
+实际执行和观测仍然需要记录 prefill 估计，因此 lifecycle reservation 会单独维护 page-aligned LCP。记 $N_{\mathrm{lcp,page}}$ 为按目标 Engine KV page size 向下对齐后的 LCP， $N_{\mathrm{prefill}}$ 为执行侧预估的 prefill token 数，则：
 
 ```math
 N_{\mathrm{prefill}}=
@@ -223,11 +223,11 @@ N_{\mathrm{prompt}},
 \end{cases}
 ```
 
-用于调度打分的增量与请求生命周期内的 reservation 分开记录。前者只包含 $`\Delta Q_{\mathrm{step}}`$ 和 $`\Delta N_{\mathrm{step}}`$，用于比较候选 Engine；后者记录请求数、$`N_{\mathrm{prompt}}+N_{\mathrm{out}}`$ 个预留 token 以及 $`N_{\mathrm{prefill}}`$，用于请求执行期间的资源占用统计。
+用于调度打分的增量与请求生命周期内的 reservation 分开记录。前者只包含 $\Delta Q_{\mathrm{step}}$ 和 $\Delta N_{\mathrm{step}}$，用于比较候选 Engine；后者记录请求数、 $N_{\mathrm{prompt}}+N_{\mathrm{out}}$ 个预留 token 以及 $N_{\mathrm{prefill}}$，用于请求执行期间的资源占用统计。
 
 #### Projected Pressure
 
-Projected pressure 由 request、token 和 queue 三类压力组成，分别覆盖 Engine 正在执行的并发占用、KV/token 空间压力和已形成的排队长尾。对每个候选 Engine $`e`$，调度器将三项压力归一化后相加，得到目标 Engine 接收当前 step 后的投影分数。记 $`C_{\mathrm{req}}`$ 为 request capacity，$`C_{\mathrm{token}}`$ 为 token capacity，$`U_{\mathrm{token}}`$ 为 Engine 报告的 `token_usage`：
+Projected pressure 由 request、token 和 queue 三类压力组成，分别覆盖 Engine 正在执行的并发占用、KV/token 空间压力和已形成的排队长尾。对每个候选 Engine $e$，调度器将三项压力归一化后相加，得到目标 Engine 接收当前 step 后的投影分数。记 $C_{\mathrm{req}}$ 为 request capacity， $C_{\mathrm{token}}$ 为 token capacity， $U_{\mathrm{token}}$ 为 Engine 报告的 `token_usage`：
 
 ```math
 \begin{aligned}
@@ -258,7 +258,7 @@ P_{\mathrm{run}}(e)
 
 #### Engine Selection
 
-调度器先在候选集合 $`\mathcal{C}`$ 中找到 projected pressure 最低的 Engine：
+调度器先在候选集合 $\mathcal{C}$ 中找到 projected pressure 最低的 Engine：
 
 ```math
 e_{\mathrm{best}}
@@ -267,7 +267,7 @@ e_{\mathrm{best}}
 P_{\mathrm{total}}(e).
 ```
 
-代码将差值不超过 $`\tau`$（$`10^{-7}`$，对应代码中的 `SCORE_TOLERANCE`）的候选视为同分。如果 sticky owner 位于同分集合中，调度器优先保留 owner；否则使用 `SHA256(session_id, engine_url)` 生成稳定排名，使决策在多次运行中可复现，同时将不同 session 稳定地分散到同分 Engine。
+代码将差值不超过 $\tau$（ $10^{-7}$，对应代码中的 `SCORE_TOLERANCE`）的候选视为同分。如果 sticky owner 位于同分集合中，调度器优先保留 owner；否则使用 `SHA256(session_id, engine_url)` 生成稳定排名，使决策在多次运行中可复现，同时将不同 session 稳定地分散到同分 Engine。
 
 对已有且 owner 健康的 session，调度器还会计算相对负载改善，避免在收益很小时反复改变分配：
 
@@ -281,7 +281,7 @@ P_{\mathrm{total}}(e_{\mathrm{owner}})
 {\max(P_{\mathrm{total}}(e_{\mathrm{owner}}),\varepsilon)}.
 ```
 
-其中 $`\varepsilon=10^{-9}`$，为防止除零的小量。最终选择规则为：
+其中 $\varepsilon=10^{-9}$，为防止除零的小量。最终选择规则为：
 
 ```math
 e_{\mathrm{target}}=
@@ -298,7 +298,7 @@ e_{\mathrm{owner}},
 \end{cases}
 ```
 
-$`\theta_{\mathrm{min}}`$ 对应实现中的 `min_load_improvement_ratio`，默认值为 `0.10`。该阈值用于迁移门控：小幅负载波动不会触发迁移，只有足够大的预期改善才会替换当前 owner。新 session 和强制 failover 没有 owner 收益阈值，直接选择最低压力候选。如果 owner 健康但快照不可用，系统保留 owner；如果 failover 或新 session 暂时没有 fresh snapshot，则使用同一稳定哈希排名选择健康 Engine，而不是在不完整观测上做激进迁移。
+$\theta_{\mathrm{min}}$ 对应实现中的 `min_load_improvement_ratio`，默认值为 `0.10`。该阈值用于迁移门控：小幅负载波动不会触发迁移，只有足够大的预期改善才会替换当前 owner。新 session 和强制 failover 没有 owner 收益阈值，直接选择最低压力候选。如果 owner 健康但快照不可用，系统保留 owner；如果 failover 或新 session 暂时没有 fresh snapshot，则使用同一稳定哈希排名选择健康 Engine，而不是在不完整观测上做激进迁移。
 
 ## 04 实验评估
 
@@ -369,9 +369,9 @@ Step Balance 当前以单个 generation step 为调度单位。Step 到达 Proxy
 
 ### 下一阶段：Multi-Batch MILP
 
-**从 1 对 N 到 M 对 N。** 当前的逐 step Greedy 适合低延迟在线决策，但它本质上是 1 个请求对 N 个 Engine 的在线分配：每个 step 独立做 `argmin`，前一个 step 的决策会改变后续 step 看到的负载，整组请求的最终分布受到达顺序影响，只保证单步局部最优，也不会显式比较不同迁移组合的整体收益和 KV 恢复代价。后续计划引入 step-batch 调度，把问题扩展为 M 个请求对 N 个 Engine 的联合分配：Proxy 将短时间内到达的 ready steps 组成小 batch，共享同一份负载快照，用混合整数线性规划（Mixed-Integer Linear Programming, MILP）直接建模，目标函数最小化 batch 提交后的最大 Engine pressure。由于贪心产生的任何分配都是 MILP 的可行解，其最优值 $`z^*`$ 不会差于逐 step 贪心，而是在给定快照与增量估计下做到模型内的全局最优；当然，这个最优受快照新鲜度和增量估计保真度限制，并不等同于真实系统的全局最优。
+**从 1 对 N 到 M 对 N。** 当前的逐 step Greedy 适合低延迟在线决策，但它本质上是 1 个请求对 N 个 Engine 的在线分配：每个 step 独立做 `argmin`，前一个 step 的决策会改变后续 step 看到的负载，整组请求的最终分布受到达顺序影响，只保证单步局部最优，也不会显式比较不同迁移组合的整体收益和 KV 恢复代价。后续计划引入 step-batch 调度，把问题扩展为 M 个请求对 N 个 Engine 的联合分配：Proxy 将短时间内到达的 ready steps 组成小 batch，共享同一份负载快照，用混合整数线性规划（Mixed-Integer Linear Programming, MILP）直接建模，目标函数最小化 batch 提交后的最大 Engine pressure。由于贪心产生的任何分配都是 MILP 的可行解，其最优值 $z^*$ 不会差于逐 step 贪心，而是在给定快照与增量估计下做到模型内的全局最优；当然，这个最优受快照新鲜度和增量估计保真度限制，并不等同于真实系统的全局最优。
 
-设 $`\mathcal{B}`$ 为当前 batch 的 step 集合，$`\mathcal{C}_s`$ 为 step $`s`$ 的候选 Engine 集合，$`x_{s,i}\in\{0,1\}`$ 表示是否将 step $`s`$ 分配给 Engine $`i`$。$`L_i^{\mathrm{base}}`$ 是 Engine 当前的基础压力，$`\Delta L_{s,i}`$ 是该 Engine 接收 step 后新增的负载压力。引入辅助变量 $`z`$ 表示 batch 提交后的最大 Engine pressure，主问题可写为：
+设 $\mathcal{B}$ 为当前 batch 的 step 集合， $\mathcal C_s$ 为 step $s$ 的候选 Engine 集合， $x_{s,i}\in\{0,1\}$ 表示是否将 step $s$ 分配给 Engine $i$。 $L_i^{\mathrm{base}}$ 是 Engine 当前的基础压力， $\Delta L_{s,i}$ 是该 Engine 接收 step 后新增的负载压力。引入辅助变量 $z$ 表示 batch 提交后的最大 Engine pressure，主问题可写为：
 
 ```math
 \begin{aligned}
@@ -389,7 +389,7 @@ x_{s,i}\Delta L_{s,i}
 \end{aligned}
 ```
 
-在此基础上，可以用 $`C_{s,i}^{\mathrm{migration}}`$ 表示把 step 迁移到 Engine $`i`$ 需要恢复或重算的 KV token 数（目标能从共享 L3 恢复前缀时，成本主要来自 restore 和剩余 prefill；否则接近完整 prefill）。在最大 pressure 达到最优值 $`z^*`$ 后，保留唯一分配与二元约束，继续求解：
+在此基础上，可以用 $C_{s,i}^{\mathrm{migration}}$ 表示把 step 迁移到 Engine $i$ 需要恢复或重算的 KV token 数（目标能从共享 L3 恢复前缀时，成本主要来自 restore 和剩余 prefill；否则接近完整 prefill）。在最大 pressure 达到最优值 $z^*$ 后，保留唯一分配与二元约束，继续求解：
 
 ```math
 \begin{aligned}

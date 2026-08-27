@@ -174,10 +174,10 @@ R_{\mathrm{run}}(e)
 &= R_{\mathrm{snapshot}}(e),\\
 N_{\mathrm{token}}(e)
 &= N_{\mathrm{snapshot}}(e)
- + \Delta N_{\mathrm{local}}(e),\\
++\Delta N_{\mathrm{local}}(e),\\
 Q_{\mathrm{wait}}(e)
 &= Q_{\mathrm{snapshot}}(e)
- + \Delta Q_{\mathrm{local}}(e).
++\Delta Q_{\mathrm{local}}(e).
 \end{aligned}
 $$
 
@@ -262,8 +262,7 @@ The scheduler first finds the Engine with the lowest projected pressure in the c
 
 $$
 e_{\mathrm{best}}
-=
-\arg\min_{e\in\mathcal{C}}
+= \arg\min_{e\in\mathcal{C}}
 P_{\mathrm{total}}(e).
 $$
 
@@ -273,8 +272,7 @@ For an existing session with a healthy owner, the scheduler also computes the re
 
 $$
 G_{\mathrm{load}}
-=
-\frac{
+= \frac{
 P_{\mathrm{total}}(e_{\mathrm{owner}})
 -P_{\mathrm{total}}(e_{\mathrm{best}})
 }
@@ -371,7 +369,7 @@ Step Balance currently schedules at single generation-step granularity. When a s
 
 **From 1-to-N to M-to-N.** The current per-step greedy approach suits low-latency online decisions, but it is essentially an online assignment of 1 request to N Engines: each step does its own `argmin`, each decision changes the load seen by later steps, the final distribution of the whole request group depends on arrival order, only per-step local optimality is guaranteed, and the overall gain and KV recovery cost of different migration combinations are never explicitly compared. The next phase introduces step-batch scheduling, extending the problem to a joint assignment of M requests to N Engines: the Proxy groups ready steps arriving within a short window into a small batch that shares one load snapshot, models the problem directly with Mixed-Integer Linear Programming (MILP), and minimizes the maximum Engine pressure after the batch is committed. Since any allocation produced by the greedy policy is a feasible solution of the MILP, its optimal value $z^*$ is no worse than per-step greedy—instead, it is globally optimal within the model given the snapshot and delta estimates; of course, this optimality is bounded by snapshot freshness and the fidelity of the delta estimates, and is not equivalent to the global optimum of the real system.
 
-Let $\mathcal{B}$ be the set of steps in the current batch, $\mathcal{C}_s$ the candidate Engine set of step $s$, and $x_{s,i}\in\{0,1\}$ indicate whether step $s$ is assigned to Engine $i$. $L_i^{\mathrm{base}}$ is the Engine's current base pressure, and $\Delta L_{s,i}$ the additional load pressure if that Engine takes the step. Introducing an auxiliary variable $z$ for the maximum Engine pressure after the batch is committed, the master problem is:
+Let $\mathcal{B}$ be the set of steps in the current batch, $\mathcal C_s$ the candidate Engine set of step $s$, and $x_{s,i}\in\{0,1\}$ indicate whether step $s$ is assigned to Engine $i$. $L_i^{\mathrm{base}}$ is the Engine's current base pressure, and $\Delta L_{s,i}$ the additional load pressure if that Engine takes the step. Introducing an auxiliary variable $z$ for the maximum Engine pressure after the batch is committed, the master problem is:
 
 $$
 \begin{aligned}
