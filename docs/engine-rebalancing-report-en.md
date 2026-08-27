@@ -43,17 +43,17 @@ We use a simplified model of one synchronous rollout batch to estimate the impac
 
 Under ideal balance, each Engine processes 1,600 equivalent steps, and the whole batch has 12,800 equivalent steps:
 
-$$
+```math
 T_{\mathrm{ideal}}
 = \frac{1{,}600}{100}
 = 16\ \mathrm{s}
-$$
+```
 
-$$
+```math
 \mathrm{Throughput}_{\mathrm{ideal}}
 = \frac{12{,}800}{16}
 = 800\ \mathrm{step/s}
-$$
+```
 
 The long tail of agentic rollout gradually differentiates the number of subsequent steps across Engines. Suppose the same batch still has 12,800 steps in total, but the distribution becomes the one shown below:
 
@@ -63,35 +63,35 @@ The long tail of agentic rollout gradually differentiates the number of subseque
 
 Since a synchronous batch must wait for the last Engine to finish, the tail hotspot stretches the wall time to:
 
-$$
+```math
 T_{\mathrm{tail}}
 = \frac{2{,}600}{100}
 = 26\ \mathrm{s}
-$$
+```
 
 Effective cluster throughput drops to:
 
-$$
+```math
 \mathrm{Throughput}_{\mathrm{tail}}
 = \frac{12{,}800}{26}
 \approx 492\ \mathrm{step/s}
-$$
+```
 
 Compared with the ideal balanced state, throughput falls by about:
 
-$$
+```math
 1 - \frac{492}{800}
 \approx 38.5\%
-$$
+```
 
 Average GPU utilization can be approximated as:
 
-$$
+```math
 \mathrm{Utilization}_{\mathrm{tail}}
 = \frac{12{,}800 / 100}{8 \times 26}
 = \frac{128}{208}
 \approx 61.5\%
-$$
+```
 
 This example shows that even with the same total amount of work, as long as the long tail concentrates on a few hotspot Engines, synchronous rollout is slowed by the tail completion time, the other GPUs become idle earlier, and overall utilization drops accordingly. However, if requests on heavily loaded Engines are migrated to lightly loaded ones as illustrated in the figure, the batch's tail completion time can still be effectively shortened and overall utilization improved, despite the additional migration overhead this may incur.
 
@@ -168,7 +168,7 @@ The scheduler cannot look only at the load already observed by the Engine in the
 
 The Proxy therefore merges the snapshot load with local scoring deltas not yet covered by the snapshot into an effective load. For a candidate Engine $e$, let $R_{\mathrm{run}}$ be the effective running requests, $N_{\mathrm{token}}$ the effective token occupation, and $Q_{\mathrm{wait}}$ the effective queued requests:
 
-$$
+```math
 \begin{aligned}
 R_{\mathrm{run}}(e)
 &= R_{\mathrm{snapshot}}(e),\\
@@ -179,7 +179,7 @@ Q_{\mathrm{wait}}(e)
 &= Q_{\mathrm{snapshot}}(e)
 +\Delta Q_{\mathrm{local}}(e).
 \end{aligned}
-$$
+```
 
 Here $R_{\mathrm{snapshot}}$, $N_{\mathrm{snapshot}}$, and $Q_{\mathrm{snapshot}}$ correspond to `running`, `active_tokens`, and `queued` in the snapshot, while $\Delta N_{\mathrm{local}}$ and $\Delta Q_{\mathrm{local}}$ come from the Proxy's local reservations.
 
@@ -189,13 +189,13 @@ A snapshot poll records the current reservation revision before issuing the requ
 
 The current snapshot alone is not enough; scheduling must also account for the extra pressure that assigning the current step to each Engine would create. Let $N_{\mathrm{prompt}}$ be the full input length of the current step, and $N_{\mathrm{lcp}}$ its longest common prefix length with the session's last committed tokens. Every candidate Engine first gains one queue item:
 
-$$
+```math
 \Delta Q_{\mathrm{step}}=1.
-$$
+```
 
 The scoring token delta has three cases depending on the step's relationship to the owner:
 
-$$
+```math
 \Delta N_{\mathrm{step}}=
 \begin{cases}
 \max(0,N_{\mathrm{prompt}}-N_{\mathrm{lcp}}),
@@ -205,13 +205,13 @@ N_{\mathrm{prompt}},
 N_{\mathrm{prompt}},
 & \text{new session or mandatory failover}.
 \end{cases}
-$$
+```
 
 **Why voluntary migration is scored at the full prompt.** When a step stays on the owner, the historical prefix is very likely already present in local KV, so the additional capacity pressure is mostly the suffix. When the step migrates to another Engine, however, the amount of prefix the target can recover through Mooncake L3 depends on the cache state at recovery time: whether the prefix is still in L3, whether it has been evicted, and how much available space the target Engine has at that moment. These factors cannot be known precisely when the request enters the Proxy. If scoring deducted an "assumed recoverable" prefix up front, then whenever the actual hit falls short of the assumption, the Proxy would systematically overestimate the target Engine's free space and steer too many steps toward Engines that only look idle, causing over-aggressive migration. Scoring therefore compares candidates under the worst case, namely the capacity pressure of the full prompt. In other words, the scheduling score describes an upper bound on the target Engine's capacity pressure after taking over the current step, not the actual number of prefill tokens. This upper bound does not stay distorted for long: the Engine-reported `token_usage` folds real cache occupation into the pressure, so the actual occupation formed by recovered or shared KV on the target Engine is still reflected, and the target does not appear emptier than it really is.
 
 Execution and observability still need a prefill estimate, so the lifecycle reservation separately maintains a page-aligned LCP. Let $N_{\mathrm{lcp,page}}$ be the LCP rounded down to the target Engine's KV page size, and $N_{\mathrm{prefill}}$ the execution-side estimated number of prefill tokens:
 
-$$
+```math
 N_{\mathrm{prefill}}=
 \begin{cases}
 \max(0,N_{\mathrm{prompt}}-N_{\mathrm{lcp}}),
@@ -221,7 +221,7 @@ N_{\mathrm{prompt}}-N_{\mathrm{lcp,page}},
 N_{\mathrm{prompt}},
 & \text{new session, mandatory failover, or unrecoverable}.
 \end{cases}
-$$
+```
 
 The deltas used for scheduling scores are recorded separately from the reservation over the request's lifecycle. The former contains only $\Delta Q_{\mathrm{step}}$ and $\Delta N_{\mathrm{step}}$ and is used to compare candidate Engines; the latter records the request count, $N_{\mathrm{prompt}}+N_{\mathrm{out}}$ reserved tokens, and $N_{\mathrm{prefill}}$, and is used for resource-occupation accounting while the request executes.
 
@@ -229,7 +229,7 @@ The deltas used for scheduling scores are recorded separately from the reservati
 
 Projected pressure consists of request, token, and queue pressure, covering the Engine's running-request pressure, KV/token space pressure, and the queuing tail that has already formed. For each candidate Engine $e$, the scheduler normalizes the three terms and sums them into a projected score for the state after the target Engine takes the current step. Let $C_{\mathrm{req}}$ be the request capacity, $C_{\mathrm{token}}$ the token capacity, and $U_{\mathrm{token}}$ the Engine-reported `token_usage`:
 
-$$
+```math
 \begin{aligned}
 P_{\mathrm{run}}(e)
 &=
@@ -252,7 +252,7 @@ P_{\mathrm{run}}(e)
 +P_{\mathrm{token}}(e)
 +P_{\mathrm{queue}}(e).
 \end{aligned}
-$$
+```
 
 Both `request_capacity` and `token_capacity` come from the Engine snapshot. Capacity normalization lets Engines with different TP/DP topologies or cache sizes be compared on the same scale; `max(..., token_usage)` ensures the Proxy's token estimate never falls below the Engine's own reported usage. `token_usage` tracks real cache pressure more closely than a plain prompt-token estimate, because it describes the token capacity currently occupied by the Engine’s KV state after deducting available space and evicted/reclaimable cache.
 
@@ -260,28 +260,28 @@ Both `request_capacity` and `token_capacity` come from the Engine snapshot. Capa
 
 The scheduler first finds the Engine with the lowest projected pressure in the candidate set $\mathcal{C}$:
 
-$$
+```math
 e_{\mathrm{best}}
 = \arg\min_{e\in\mathcal{C}}
 P_{\mathrm{total}}(e).
-$$
+```
 
 The code treats candidates whose scores differ by no more than $\tau$ ($10^{-7}$, `SCORE_TOLERANCE` in the code) as tied. If the sticky owner is in the tied set, the scheduler prefers to keep the owner; otherwise it generates a stable ranking with `SHA256(session_id, engine_url)`, making decisions reproducible across runs while spreading different sessions steadily across tied Engines.
 
 For an existing session with a healthy owner, the scheduler also computes the relative load improvement to avoid flip-flopping the assignment for marginal gains:
 
-$$
+```math
 G_{\mathrm{load}}
 = \frac{
 P_{\mathrm{total}}(e_{\mathrm{owner}})
 -P_{\mathrm{total}}(e_{\mathrm{best}})
 }
 {\max(P_{\mathrm{total}}(e_{\mathrm{owner}}),\varepsilon)}.
-$$
+```
 
 Here $\varepsilon=10^{-9}$ is a small constant guarding against division by zero (`_RATIO_EPSILON` in the code). The final selection rule is:
 
-$$
+```math
 e_{\mathrm{target}}=
 \begin{cases}
 e_{\mathrm{best}},
@@ -294,7 +294,7 @@ G_{\mathrm{load}}\geq\theta_{\mathrm{min}},\\
 e_{\mathrm{owner}},
 & \text{otherwise}.
 \end{cases}
-$$
+```
 
 $\theta_{\mathrm{min}}$ corresponds to `min_load_improvement_ratio` in the implementation, with a default of `0.10`. This threshold gates migration: small load fluctuations never trigger a migration, and only a sufficiently large expected improvement replaces the current owner. New sessions and mandatory failovers have no owner-gain threshold and directly take the lowest-pressure candidate. If the owner is healthy but its snapshot is unavailable, the system keeps the owner; if a failover or a new session has no fresh snapshot for the moment, the same stable hash ranking is used to pick a healthy Engine, rather than migrating aggressively on incomplete observations.
 
@@ -371,7 +371,7 @@ Step Balance currently schedules at single generation-step granularity. When a s
 
 Let $\mathcal{B}$ be the set of steps in the current batch, $\mathcal C_s$ the candidate Engine set of step $s$, and $x_{s,i}\in\{0,1\}$ indicate whether step $s$ is assigned to Engine $i$. $L_i^{\mathrm{base}}$ is the Engine's current base pressure, and $\Delta L_{s,i}$ the additional load pressure if that Engine takes the step. Introducing an auxiliary variable $z$ for the maximum Engine pressure after the batch is committed, the master problem is:
 
-$$
+```math
 \begin{aligned}
 \min_{x,z}\quad & z\\
 \text{s.t.}\quad
@@ -385,11 +385,11 @@ x_{s,i}\Delta L_{s,i}
 & x_{s,i}\in\{0,1\},
 && \forall s\in\mathcal{B},\ i\in\mathcal{C}_s.
 \end{aligned}
-$$
+```
 
 On top of this, $C_{s,i}^{\mathrm{migration}}$ can denote the number of KV tokens that must be restored or recomputed to migrate step $s$ to Engine $i$ (when the target can restore the prefix from shared L3, the cost mainly comes from restore plus the remaining prefill; otherwise it is close to a full prefill). After the maximum pressure reaches its optimal value $z^*$, keeping the uniqueness and binary constraints, we continue to solve:
 
-$$
+```math
 \begin{aligned}
 \min_x\quad
 & \sum_{s\in\mathcal{B}}\sum_{i\in\mathcal{C}_s}
@@ -401,7 +401,7 @@ x_{s,i}\Delta L_{s,i}
 \leq z^*,
 && \forall i.
 \end{aligned}
-$$
+```
 
 This two-stage objective first minimizes the maximum Engine pressure after the batch is committed, and then picks the allocation with the lower KV recovery cost among the feasible solutions that achieve the same load target.
 
